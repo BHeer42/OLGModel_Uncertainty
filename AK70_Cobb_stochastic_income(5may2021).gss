@@ -1,0 +1,1738 @@
+@ ------------------------------ AK70_stochastic_income.g ----------------------------
+
+    14. April 2021, Burkhard Heer
+
+    finite value function approximation
+    
+    
+    exogenous labor supply: solving non-
+
+    linear interpolation between grid points
+
+    Golden Section Search
+
+
+-------------------------------------------------------------------------@
+
+
+new;
+clear all;
+cls;
+library pgraph;
+library pgraph,user;
+Macheps=1e-30;
+#include toolbox.src;
+#include function.src;
+#include _tools_pck.src;    // New: non-linear eqs algorithm that allows to pass on globals to a routine
+_MNR_GVars=1; 
+Graphsettings;
+
+@  ----------------------------
+
+computational parameters
+
+--------------------------------- @
+
+eps=0.05;   // small parameter to check if we have boundary solution for a'(a) at a=0 or a=kmax
+phi=0.80;    // update aggregate variables in outer iteration over K, L, tr, taup, taun
+tol=0.0001;       // percentage deviation of final solution */
+tol1=1e-5;      // tolerance for golden section search */
+neg=-1e10;       // initial value for value function */
+nq = 30;    // number of outer iterations
+//nq=1;
+
+@ ---------------------------
+
+ parameter
+
+---------------------------- @
+
+//
+// 1.1 set model type and age parameters
+//
+case_UNscen=1;		    // 1 -- medium variant, 2 -- low variant, 3 -- high variant for population projection UN (2015)
+year1=2015;				// 1970,..,2015, 2020: population parameters, must be a mulitple of 5
+finalyear=2100;	        // must be in {2050,2055,..,2095,2100} 
+ntrans=300;             // number of transition periods 
+nage=70;                // maximum age                  
+nw=45;                  // number of working years        
+Rage=46;                // first period of retirement 
+nr=nage-Rage+1;         // number of retirement years 
+nage1=15;               // number of 5-year periods in OLG model (demographic data is only given for 5-year intervals)
+
+// Parameterization as in Trabandt/Uhlig
+// final goods production 
+alpha=0.35;     // production elasticity of capital
+delta=0.083;    // depreciation rate
+beta1 = 1.011;
+//beta1 = 1.037;
+//beta1 = 1.05;
+rbbar=1.04;		// annual real interest rate on bonds
+taulbar=0.28;	// both taul+taup=0.28!!, see Mendoza, Razin (1994), p. 311
+tauk=0.36;      // capital income tax rate
+tauc=0.05;      // consumption tax rate
+taup=0.124;     // initial guess for social security contribution rate
+replacement_ratio=0.352;	// gross replacement ratio US
+bybar=0.63;					// debt-output ratio
+gybar=0.18;					// government consumption-output ratio
+
+lbar=0.25;		// steady-state labor supply
+eta=2.0;		// 1/IES
+gam=0.33;
+
+
+ygrowth=1.02;		// annual growth factor
+
+// 
+// asset grids for policy functions and distribution
+//
+
+kmin=0;
+kmax=20;        /* upper limit of capital grid */
+kinit=0;
+na=501;          /* number of grid points on assets */
+//na=5000;
+a=seqa(kmin,(kmax-kmin)/(na-1),na);   /* asset grid */
+nag=2*na;          /* number of grid points for distribution  */
+nag=na;
+ag=seqa(kmin,(kmax-kmin)/(nag-1),nag);   /* asset grid for distribution*/
+nearn=500;          // number of grid points over income and earnings
+earn=seqa(0,0.01,nearn);    // grid over gross earnings (1-taun-taup)*w*e*y^s*theta*l
+income=earn;  // kgrid over gross income (earnings or pensions) MUST BE EQUAL TO earn
+
+labormax=0.6;   // households do not work more than 60% of their available time
+
+@  -------------------------------------------------------------
+
+productivity process
+
+markov transition matrix py
+
+productivity distribution of 20-year-old: mu[1,.]
+
+------------------------------------------------------     @
+
+nperm=2;    // number of permanent productivities
+lamb0=.96;  /* autoregressive parameter */
+sigmay1=0.38;   /* variance for 20-year old, log earnings */
+sigmae=0.045;   /* earnings disturbance term variance */
+
+sy=sqrt(sigmae/(1-lamb0^2));    /* earnings variance */
+x0=1;   
+nsim=10;
+ny=9;   /* number of productivities */
+ny=5;
+
+m=2;    
+m=1;
+ye=seqa(-m*sy,(2*m*sy)/(ny-1),ny);  /* grid over productivities */
+{x,py} = armc(nsim,x0,lamb0,sigmae,ny,m);
+
+muy=zeros(ny,1); 
+w=ye[2]-ye[1];
+muy[1]=cdfn((ye[1]+w/2)/sqrt(sigmay1));
+muy[ny]=1-cdfn((ye[ny]-w/2)/sqrt(sigmay1));
+i=1;
+do until i==ny-1;
+    i=i+1;
+    muy[i]=cdfn((ye[i]+w/2)/sqrt(sigmay1))-cdfn((ye[i]-w/2)/sqrt(sigmay1));
+endo;
+
+
+// permanent productivity types 
+perm=(0.57|1.43);   // productivity
+
+//
+// transform ye so that mean exp(ye) = 1
+// (mean efficiency equal to one)
+meane = muy'*exp(ye);
+//ye = ye-ln(meane);
+//"mean efficiency: ";
+muy'*exp(ye);
+
+//
+//  Step 1.2: Loading the demographic data from the Excel file with the UN (2015) data
+//          and transforming it to annual data
+//
+
+
+//
+// 1.2.1. population growth rate
+//
+popgrowth=xlsReadM("survival_probs_US.xls","F41:AI43",2,"");
+nrate=seqa(1955,5,30)~popgrowth';
+
+
+//
+//  cubic spline interpolation of population growth rate 1950-2100 from 5-annual to annual data
+//
+
+ptime=seqa(1955,5,30);
+cmethod=1;	// natural spline
+yp=zeros(2,1);
+
+y2=CSpline(ptime,nrate[.,case_UNscen+1]/100,cmethod,yp);
+gmethod=1;	// equally spaced nodes
+ptime1=seqa(1955,1,146);
+popgrowthall=Splint(ptime,nrate[.,case_UNscen+1]/100,y2,gmethod,ptime1);
+nrate0=nrate[.,case_UNscen+1]/100;
+
+//
+//  plotting the population growth rate: Gauss 16 or higher for the plot commands
+//          
+struct PlotControl myPlot;
+myplot=plotGetDefaults("xy");	
+plotSetLineThickness(&myPlot,3);
+plotSetTitle(&myplot,"Population Growth Rate","verdana", 20, "black");
+//plotSetTitle(&myplot,"");
+PlotSetLineColor(&myPlot,"blue"$|"red");
+PlotSetLineThickness(&myPlot,3);
+PlotSetXTicCount(&myPlot,8);
+myPlot.axesLabel.font="Charter";
+myPLot.axesLabel.fontSize=30;
+myPlot.axes.font="Charter";
+myPlot.axesNumbers.font="Charter";
+myPlot.axesNumbers.fontSize=20;
+myPlot.Legend.font="Charter";
+myPlot.Legend.fontSize=20;
+plotSetXLabel(&myplot,"Year");
+plotXY(myplot,ptime1,popgrowthall*100);
+//wait;
+
+
+//
+//  Step 1.2.2: Survival probabilities
+//
+
+//
+// load 5-year survival probs from 2015-2100
+//
+survivalprobsall=xlsReadM("survival_probs_US.xls","R22:AI37",2,"");
+survivalprobsall=rev(survivalprobsall);
+
+// step 1.2.2.1: interpolate between 5 year intervals, e.g. survival probability of the 20-year old in 2015 and 2020 
+//              to those in 2015, 2016, 2017, 2018, 2019, 2020
+nsurvival=cols(survivalprobsall);   // columns with 2015, 2020,...,2100
+ntime0=seqa(2015,5,nsurvival);      // 2015, 2020,..., 2100
+ntime1=seqa(2015,1,86);             // 2015, 2016, ... , 2100
+
+finalsp={};                         // new variable that will contain the survival probabilities in 2015
+
+nage0=rows(survivalprobsall);
+i=0;
+do until i==nage0;
+    i=i+1;
+    cmethod=1;	// natural spline
+    yp=zeros(2,1);
+    y2=CSpline(ntime0,survivalprobsall[i,.],cmethod,yp);
+    gmethod=1;	// equally spaced nodes
+    sptemp=Splint(ntime0,survivalprobsall[i,.],y2,gmethod,ntime1);
+    sptemp=sptemp^(1/5);
+    finalsp=finalsp|sptemp';
+endo;
+
+
+// step 1.2.2.2: interpolate between 5 year age intervals, e.g. survival probability of the 20-year old and 25-year old in 2015 
+//          to those aged 20, 21, 22,...
+
+finalsp1={};  // new variable that will contain the survival probabilities in 2100 (which is equal to the one in the final year)
+i=0;
+do until i==cols(finalsp);      // starting in the year 2015, interpolate between age 20, 25, ... , 95
+    i=i+1;
+    age=seqa(20,5,nage0);
+    age1=seqa(20,1,5*(nage0-1)+1);
+    cmethod=1;	// natural spline
+    yp=zeros(2,1);
+    y2=CSpline(age,finalsp[.,i],cmethod,yp);
+    gmethod=1;	// equally spaced nodes
+    sptemp=Splint(age,finalsp[.,i],y2,gmethod,age1);
+    finalsp1=finalsp1~sptemp;
+endo;
+
+popgrowthfinal=popgrowthall[61:146];        // popgrowthall contains the UN population growth rates 1950-2100, needs to be cut to 2015-2100
+
+i=cols(finalsp1);
+do until i==ntrans;
+    i=i+1;
+    finalsp1=finalsp1~sptemp;   // survivalprobabilities are constant after 2100
+    popgrowthfinal=popgrowthfinal|popgrowthall[146];
+endo;
+
+sp1=finalsp1[1:nage,1];      // survival probabilities in the initial year
+spfinal=finalsp1[1:nage,ntrans]; // survival probabilities in the final year of the transition
+popgrowth0=popgrowthfinal[1];
+popgrowth1=popgrowthfinal[ntrans];
+
+
+//	
+// load efficiency age profile from Hansen (1993) 
+//
+//  make sure that ef1.fmt is saved in the working directory
+load efage=ef1;
+ef=efage/meanc(efage);	// normalization to one
+
+
+
+
+
+//struct PlotControl myPlot;
+//myplot=plotGetDefaults("xy");	
+//plotSetLineThickness(&myPlot,5);
+
+    struct PlotControl myPlot;
+    myPlot=PlotGetDefaults("XY");
+   // PlotSetLineSymbol(&myPlot,-1|0);
+    PlotSetLineColor(&myPlot,"blue"$|"black");
+    PlotSetLineThickness(&myPlot,3);
+    PlotSetXTicCount(&myPlot,8);
+    myPlot.axesLabel.font="Charter";
+    myPLot.axesLabel.fontSize=30;
+    myPlot.axes.font="Charter";
+    myPlot.axesNumbers.font="Charter";
+    myPlot.axesNumbers.fontSize=20;
+    myPlot.Legend.font="Charter";
+    myPlot.Legend.fontSize=20;
+
+//plotSetTitle(&myplot,"Survival probabilities in benchmark year","verdana", 20, "black");
+plotSetXLabel(&myplot,"Age");
+plotSetYLabel(&myplot,"Survival Probabilities");
+plotXY(myplot,seqa(21,1,nage),sp1~spfinal);
+wait;
+
+
+plotSetYLabel(&myplot,"");
+plotSetTitle(&myplot,"Efficiency-Age Profile","verdana", 20, "black");
+plotSetXLabel(&myplot,"Age");
+plotXY(myplot,seqa(20,1,nw),ef);
+//wait;
+
+
+//
+//      Step 1.3: computation of mass 
+//                in the initial steady state
+//                and during transition (for later use)
+
+lambda=popgrowth0;
+mass=ones(nage,1);     
+i=1;
+do until i==nage;
+    i=i+1;
+    mass[i]=mass[i-1]*sp1[i-1]/(1+lambda);
+endo;
+mass=mass/sumc(mass);
+massinitial=mass;
+
+//laborforce=zeros(ntrans,1);
+//dependencyratio=zeros(ntrans,1);    // dependency ratio
+//laborforce[1]=sumc(massinitial[1:45])/sumc(massinitial[1:70]);
+//dependencyratio[1]=sumc(massinitial[46:70])/sumc(massinitial[1:45]);
+massvec=zeros(nage,ntrans);			// mass of the generation j in period tp
+pmass1=zeros(nage,ntrans);        // total population mass, not normalized to one
+pmass1[.,1]=massinitial;
+cohortgrowth=zeros(ntrans,1);
+cohortgrowth[1]=popgrowth0;
+testpopgrowth=zeros(ntrans,1);
+testpopgrowth[1]=popgrowth0;
+mass0=massinitial;
+massvec[1:nage,1]=mass0;
+mass1=zeros(nage,1);
+i=1;
+do until i==ntrans;
+	j=1;
+	i=i+1;
+	popgrowthm=popgrowthfinal[i];
+    
+	pmass1[1,i]=(1+popgrowthm)*pmass1[nage,i-1];
+    i1=0;
+    do until i1==nage-1;
+        i1=i1+1;
+        pmass1[1,i]= pmass1[1,i] + (1+popgrowthm-finalsp1[i1,i-1]) * pmass1[i1,i-1];
+    endo;
+    // test
+    pmass1[1,i] = (1+popgrowthm)*pmass1[1,i-1];
+	do until j==nage;
+		j=j+1;
+        pmass1[j,i]=pmass1[j-1,i-1]*finalsp1[j-1,i-1];
+	endo;
+    cohortgrowth[i] = pmass1[1,i]/pmass1[1,i-1]-1;
+    testpopgrowth[i] = sumc(pmass1[.,i])/sumc(pmass1[.,i-1])-1;
+endo;
+
+
+
+
+@ ------------------------------------------
+
+ computation of the 
+
+    the Gini coefficient of wages (workers)
+  
+------------------------------------------  @
+
+
+
+
+// wage inequality
+wages=zeros(2*ny,nw);   // productivity
+masswages=zeros(2*ny,nw);
+iperm=0;
+do until iperm==2;
+    iperm=iperm+1;
+    iy=0;
+    do until iy==ny;
+        iy=iy+1;
+        wages[(iperm-1)*ny+iy,1]=exp(ye[iy])*perm[iperm]*ef[1];
+        masswages[(iperm-1)*ny+iy,1]=1/2*muy[iy]*mass[1]/sumc(mass[1:nw]);
+    endo;
+endo;
+
+iage=1;
+do until iage==nw;
+    iage=iage+1;
+    iperm=0;
+    do until iperm==2;
+        iperm=iperm+1;
+        iy=0;
+        do until iy==ny;
+            iy=iy+1;
+            iy1=0;
+            do until iy1==ny;
+                iy1=iy1+1;
+                wages[(iperm-1)*ny+iy1,iage]=exp(ye[iy1])*perm[iperm]*ef[iage];
+                masswages[(iperm-1)*ny+iy1,iage] = masswages[(iperm-1)*ny+iy1,iage]+py[iy,iy1]*sp1[iage-1]/(1+popgrowth0)*masswages[(iperm-1)*ny+iy,iage-1];
+            endo;
+        endo;
+    endo;
+endo;
+
+wages=vec(wages);
+masswages=vec(masswages);
+wages=wages~masswages;
+wages=sortc(wages,1);
+save wages;
+
+gini_wage=ginid(wages[.,1],wages[.,2]);
+
+"gini wage: " gini_wage;
+wait;
+
+// empirical distribution of earnings
+//
+ea=(0~0|
+    0.05~0|
+    0.1~0|
+    0.2~0|
+    0.4~0.032|
+    0.6~0.125|
+    0.8~0.233|
+    0.9~0.6139-0.1238-0.1637-0.1476|
+    0.95~0.1238|
+    0.99~0.1637|
+    1~1);
+    
+    
+ea[2:rows(ea)-1,2]=cumsumc(ea[2:rows(ea)-1,2]);
+ea=ea|ones(rows(earn)-rows(ea),2);
+
+
+h0=hsec;
+
+
+@ ---------------------------------
+
+initialization
+
+
+guess:
+labor - 0.2 (working hours times labor force, 0.3*2/3)
+capital - so that r=3% 
+wealth - approximately 80% in capital, 20% in government bonds
+trbar - small number
+
+--------------------------------- @
+
+rbar=0.03;
+nbar=0.3;   // aggregate efficienct labor L
+nold=100;
+mean_labor=0.3;   // average working hours
+kbar=(alpha/(rbar+delta))^(1/(1-alpha))*nbar;
+kold=100;
+omega = kbar*1.2;
+trbar=0.01;    // transfers, initial guess */
+w=wage(kbar,nbar); 
+r=interest(kbar,nbar);
+pen=replacement_ratio*(1-taulbar)*w*mean_labor*sumc(mass)/sumc(mass[1:nw]);
+taup=pen*sumc(mass[nw+1:nage])/sumc(mass)/(w*nbar); // balanced budet social security
+taun = taulbar-taup;
+bequests=0;
+
+@ ---------------------------------------------
+
+iteration of policy function, wealth distribution,..
+
+---------------------------------------------- @
+
+// saves aggregates during iteration: K, L, Omega, mean labor, taun, taup, tr, bequests
+aggregateq = zeros(nq,8);
+
+
+// case: all cohorts are equal
+//py =eye(ny);
+//ye = zeros(ny,1);
+//perm = (1|1);
+
+q=0;
+do until q==nq or (abs((kbar-kold)/kbar)<tol and abs((nbar-nold)/nbar)<tol); // percentage deviation of K and L below tol
+    krit=abs((kbar-kold)/kbar);
+    cls;
+    q=q+1;
+    aggregateq[q,1] = kbar;
+    aggregateq[q,2] = nbar;
+    aggregateq[q,3] = omega;
+    aggregateq[q,4] = mean_labor;
+    aggregateq[q,5] = taun;
+    aggregateq[q,6] = taup;
+    aggregateq[q,7] = bequests;
+    aggregateq[q,8] = trbar;
+    
+    w=wage(kbar,nbar); 
+    r=interest(kbar,nbar);
+    kold=kbar;
+    nold=nbar;
+    rb=(1-tauk)*(r-delta);
+//    mean_laborold=mean_labor;
+    
+    // retired agents' value function  
+    vr=zeros(na,nr);    // value function with lump-sum pensions: only depends on assets a
+    aropt=zeros(na,nr);  // optimal asset 
+    cropt=zeros(na,nr); // optimal consumption 
+    
+    l=0;
+    do until l==na;
+        l=l+1;
+        c=a[l]*(1+(1-tauk)*(r-delta))+pen+trbar;
+        c = c/(1+tauc);
+        vr[l,nr]=u(c,0);
+        cropt[l,nr]=c;
+    endo;
+
+    // workers' value function 
+    vw=zeros(na*ny*nperm,nw);
+    awopt=zeros(na*ny*nperm,nw);
+    lopt=zeros(na*ny*nperm,nw);
+    cwopt=zeros(na*ny*nperm,nw);
+
+    // computation of the decision rules for the retired 
+    i=nr;
+    do until i==1;      // all periods t=nw+1,nw+2,..,nw+nr 
+        i=i-1;
+        l=0;
+        do until l==na;     /* asset holding in period t */
+            l=l+1;
+//            y=varput(a[l],"k0");
+
+            // triple ax,bx,cx */
+            ax=0; bx=-1; cx=-2;
+            v0=neg;
+            m=0;
+            do until ax<=bx and bx<=cx;
+                m=m+1;
+                v1=value1(a[m]);
+                if v1>v0;
+                    if m==1; 
+                        ax=a[m]; bx=a[m];
+                    else;
+                        bx=a[m]; ax=a[m-1];
+                    endif;
+                    v0=v1;
+                else;
+                    cx=a[m];
+                endif;
+                if m==na; 
+                    ax=a[m-1]; bx=a[m]; cx=a[m]; 
+                endif;
+            endo;
+
+            if ax==bx;  // check: a[1] is maximum point on grid?
+                bx=ax+(a[2]-a[1])*eps;
+                if value1(ax)>value1(bx); // boundary solution
+                    aropt[l,i]=kmin;
+                else;
+                    cx=a[2];
+                    aropt[l,i]=golden(&value1,ax,bx,cx,tol1);
+                endif;
+            elseif bx==cx; // check: a[na] is maximum point on grid?
+                ax=a[na-1];
+                cx=a[na];
+                bx=a[na]-eps*(cx-ax);
+                if value1(cx)>value1(bx);   
+                    aropt[l,i]=a[na];
+                else;
+                    aropt[l,i]=golden(&value1,ax,bx,cx,tol1);
+                endif;
+            else; // interior solution ax<bx<cx
+                aropt[l,i]=golden(&value1,ax,bx,cx,tol1);
+            endif;
+
+            vr[l,i]=value1(aropt[l,i]);
+            c = (1+(1-tauk)*(r-delta))*a[l]+pen+trbar-ygrowth*aropt[l,i]; 
+            cropt[l,i] = c/(1+tauc); 
+
+            "q~i~l~n:" q~i~l~nbar;
+        endo; // a[l], l=1,..na
+    endo;     // i = nr, nr-1,...,1
+
+@ -----------------------------------------------------------------------
+
+ compuation of the decsion rules for the worker 
+
+-------------------------------------------------------------------------  @
+  
+    // plotting policy function
+    testage=nw;
+    ltest=zeros(na,ny*nperm);
+    atest=zeros(na,ny*nperm);
+    ctest=zeros(na,ny*nperm);
+
+    i=nw+1;
+    do until i==1;      /* all periods i=1,2,..nw */
+        i=i-1;
+        i;
+        iperm=0;
+        do until iperm==nperm;  // permanent productivity types
+            iperm=iperm+1;
+            j=0;
+            do until j==ny;     // idiosyncratic component of productivity at age i 
+                j=j+1;
+                l=0;
+                m0=0;
+                do until l==na;     // asset holding at age t 
+                    l=l+1;
+                    
+                if i==40 and iperm==1 and j==3 and l==139;
+        //            wait;
+                endif;
+                    k0=a[l];
+                    
+                    //
+                    // critical step: find a good initial value for the optimal labor supply
+                    //  in the non-linear equation optimal_labor(x)
+                    //
+                    // simply putting the initial value labor=0.3 does NOT work!
+                    
+                    if q==1 and i==nw and l==1 and j==1;     
+                        laborinitial=0.3;
+                    else;
+                        if q>1;
+                            laborinitial = lopt[(iperm-1)*na*ny+(l-1)*ny+j,i];
+                        else;
+                            if l>1;
+                                laborinitial = lopt[(iperm-1)*na*ny+(l-2)*ny+j,i];
+                            else;
+                                if i<nw;
+                                    laborinitial = lopt[(iperm-1)*na*ny+(l-1)*ny+j,i+1];
+                                elseif j>1;
+                                    laborinitial = lopt[(iperm-1)*na*ny+(l-1)*ny+j-1,i];
+                                endif;
+                            endif;
+                        endif;
+                    endif;
+                                    
+                                    
+                                
+                    
+                    // triple ax,bx,cx
+                    ax=0; bx=-1; cx=-2;
+                    v0=neg;
+                    m=m0;
+                    do until ax<=bx and bx<=cx;
+                        m=m+1;
+                        v1=value2(a[m]);
+                        if v1>v0;
+                            m0=maxc(0|m-2); // monotonocity in a'(a)
+                            if m==1; 
+                                ax=a[m]; bx=a[m];
+                            else;
+                                bx=a[m]; ax=a[m-1];
+                            endif;
+                            v0=v1;
+                        else;
+                            cx=a[m];
+                        endif;
+                        if m==na; 
+                            ax=a[m-1]; bx=a[m]; cx=a[m]; 
+                        endif;
+                    endo;
+
+
+                    
+                if i==40 and iperm==1 and j==3 and l==139;
+                    kgrid=seqa(ax,(cx-ax)/100,100);
+                    ygrid=zeros(100,1);
+                    i1=0;
+                    do until i1==100;
+                        i1=i1+1;
+                        ygrid[i1]=value2(kgrid[i1]);
+                    endo;
+                    xy(kgrid,ygrid);
+      //              wait;
+                endif;
+
+                    if ax==bx;  /* boundary optimum, ax=bx=a[1]  */
+                        bx=ax+eps*(a[2]-a[1]);
+                        if value2(bx)<value2(ax);
+                            k1=a[1];
+                        else;
+                            k1 = golden(&value2,ax,bx,cx,tol1);
+                        endif;
+                    elseif bx==cx;
+                        bx=cx-eps*(a[na]-a[na-1]);
+                        if value2(bx)<value2(cx);
+                            k1 = a[na];
+                        else;
+                            k1 = golden(&value2,ax,bx,cx,tol1);
+                        endif;
+                    else;
+                        k1 = golden(&value2,ax,bx,cx,tol1);
+                    endif;
+        
+            
+                    awopt[(iperm-1)*ny*na+(l-1)*ny+j,i]=k1;
+//                    y = varput(k0,"k0");  
+//                    y = varput(k1,"k1");
+                    glo=k0|k1;
+                    labor = optimal_labor(glo);
+                    // {labor,jcode}=FixVMN(laborinitial,&optimal_labor1,glo);             
+                    // if abs(optimal_labor1(labor,glo))>tol;
+         //               "optimal_labor not equal zero"; wait;
+                    // endif;
+                    if labor<0;
+                        labor=0;
+                    endif;
+                    if labor>labormax;
+                        labor=labormax;
+                    endif;
+                    
+                    lopt[(iperm-1)*ny*na+(l-1)*ny+j,i]=labor;
+        
+                    c=(1+(1-tauk)*(r-delta))*k0+(1-taun-taup)*w*ef[i]*exp(ye[j])*perm[iperm]*labor+trbar-ygrowth*k1;
+                    c=c/(1+tauc);
+                   
+                    
+
+                    vw[(iperm-1)*ny*na+(l-1)*ny+j,i] = value2(k1);
+                    cwopt[(iperm-1)*ny*na+(l-1)*ny+j,i] = c;
+                    
+                endo;   // a': l=1,..,na
+                
+            endo;   // idiosyncratic productivity j=1,..,ny
+        endo;       // iperm = 1,2
+@        
+        if i==testage and q==1;
+            iperm=0;
+            do until iperm==2;
+                iperm=iperm+1;
+                j=0;
+                do until j==ny;
+                    j=j+1;
+                    ia=0;
+                    do until ia==na;
+                        ia=ia+1;
+                        ltest[ia,(iperm-1)*ny+j]=lopt[(iperm-1)*ny*na+(ia-1)*ny+j,i];
+                        atest[ia,(iperm-1)*ny+j]=awopt[(iperm-1)*ny*na+(ia-1)*ny+j,i];
+                        ctest[ia,(iperm-1)*ny+j]=cwopt[(iperm-1)*ny*na+(ia-1)*ny+j,i];
+                    endo;
+                endo;
+            endo;
+
+struct PlotControl myPlot;
+myPlot=PlotGetDefaults("XY");
+plotCanvasSize("mm",117|61,300);
+myPlot.lineColor="red"$|"blue"$|"black"$|"black";
+myPlot.lineThickness=3;
+myPlot.axesLabel.font="Charter";
+myPlot.Legend.font="Charter";
+myPlot.Legend.fontSize=20;
+myPLot.axesLabel.fontSize=20;
+myPlot.axes.font="Charter";
+myPlot.axesNumbers.font="Charter";
+myPlot.axesNumbers.fontSize=18;
+//myPlot.LineLegendText="f(x)=1/(1+x<sup>2</sup>)"$|"p<sub>5</sub>(x)"$|"p<sub>10</sub>(x)";
+plotSetGrid(&myPlot,"off");
+
+//PlotSetLineThickness(&myPlot,5);
+PlotSetXTicCount(&myPlot,8);
+//myPlot.axesLabel.font="Charter";
+//myPLot.axesLabel.fontSize=30;
+//myPlot.axes.font="Charter";
+//myPlot.axesNumbers.font="Charter";
+//myPlot.axesNumbers.fontSize=20;
+//myPlot.Legend.font="Charter";
+//myPlot.Legend.fontSize=20;
+plotSetLegend(&myplot,"off");
+//myplot.lineLegendText="Model"$|"Wealth"$|"Equal distribution";
+//plotSetLegend(&myplot,"Model"$|"US"$|"Equal distribution","top left");	
+plotSetYLabel(&myplot,"Labor");
+plotSetXLabel(&myplot,"Individual wealth");
+plotSetTitle(&myplot,"");
+plotXY(myplot,a,ltest[.,1:9]);
+wait;
+          
+     plotSetYLabel(&myplot,"Next-period assets a'");
+plotSetXLabel(&myplot,"Individual wealth");
+plotSetTitle(&myplot,"");
+plotXY(myplot,a,atest[.,1:9]);
+wait;     
+
+     plotSetYLabel(&myplot,"Savings a'-a");
+plotSetXLabel(&myplot,"Individual wealth");
+plotSetTitle(&myplot,"");
+plotXY(myplot,a,atest[.,1:9]-a);
+wait;     
+ 
+     plotSetYLabel(&myplot,"Consumption");
+plotSetXLabel(&myplot,"Individual wealth");
+plotSetTitle(&myplot,"");
+plotXY(myplot,a,ctest[.,1:9]);
+wait;     
+        endif;   
+ @             
+                
+                    "q~i~k~hours~rb:" q~i~kbar~mean_labor~rb;
+    endo;           // age i=1,..,nw
+  
+       
+    
+// --------------------------------------------------------------
+//
+//    
+// computation of the distribution of capital 
+//
+//    
+// ---------------------------------------------------------------
+
+    
+    gkw=zeros(nperm*nag*ny,nw); // distribution of wealth among workers
+    gkr=zeros(nag,nr);          // distribution of wealth among retirees
+    kgen=zeros(nage,1);         // distribution of wealth over age
+    gwealth=zeros(nag,1);       // distribution of wealth 
+    gearn=zeros(nearn,1);       // distribution of earnings (workers)
+    gincome=zeros(nearn,1);     // distribution of income (all households)
+    
+    gk=zeros(nag,nw);
+    gk[1,1]=mass[1];
+    
+    // mass at age 1
+    // all agents have zero wealth
+    j=0;
+    do until j==ny;
+        j=j+1;
+        gkw[j,1]=1/2*muy[j]*mass[1];      // perm[1]
+        gkw[ny*nag+j,1]=1/2*muy[j]*mass[1]; // perm[2];
+    endo;
+
+
+    //
+    // distribution at age 2,...,nw
+    //
+    i=0;
+    do until i==nw-1;
+        i=i+1; i~kgen[i];
+       
+        //if i==2;
+        //    wait;
+        //endif;
+        
+       // test=0;
+        iperm=0;
+        do until iperm==nperm;
+            iperm=iperm+1;
+            j=0;
+            do until j==ny; // present-period idiosyncratic productivity
+                j=j+1;
+                l=0;
+                do until l==nag;
+                    l=l+1;
+                    if ag[l]<=kmin; 
+                        k1=awopt[(iperm-1)*ny*na+j,i];
+                        labor = lopt[(iperm-1)*ny*na+j,i];
+                    elseif ag[l]>=kmax;
+                        k1=awopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                        labor = lopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                    else;   // linear interpolation between grid points
+                        j0=sumc(a.<ag[l])+1;
+                        j0=minc(j0|na);
+                        n0=(ag[l]-a[j0-1])/(a[j0]-a[j0-1]);
+                        k1=(1-n0)*awopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*awopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                        labor=(1-n0)*lopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*lopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                    endif;
+        
+                    //
+                    // distribution of earnings and income at age i
+                    //
+                    x = perm[iperm]*exp(ye[j])*ef[i]*w*labor;   // earnings 
+                    y = x + (r-delta)*ag[l];                // income    
+        
+                    if x<=0;
+                        gearn[1] = gearn[1] +  gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+          
+                    elseif x>=earn[nearn];
+                        gearn[nearn] = gearn[nearn] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+             
+                    else;   // linear interpolation between grid points
+                        j0=sumc(earn.<x)+1;
+                        j0=minc(j0|nearn);
+                        n0=(x-earn[j0-1])/(earn[j0]-earn[j0-1]);
+                        gearn[j0-1] = gearn[j0-1]+ (1-n0)*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+                        gearn[j0] = gearn[j0]+ n0*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+                    endif;      
+        
+                    if y<0;
+                        gincome[1] = gincome[1] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                    elseif y>=income[nearn];
+                        gincome[nearn] = gincome[nearn] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                    else;
+                        j0=sumc(income.<y)+1;
+                        j0=minc(j0|nearn);
+                        n0=(y-earn[j0-1])/(earn[j0]-earn[j0-1]);
+                        gincome[j0-1] = gincome[j0-1]+ (1-n0)*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                        gincome[j0] = gincome[j0]+ n0*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                    endif;
+                    
+                    //
+                    // dynamics of the distribution function gkw
+                    //
+                    if k1<=kmin;
+                        m=0;
+                        do until m==ny; // next-period idiosyncratic productivity
+                            m=m+1;
+                            gkw[(iperm-1)*ny*nag+m,i+1]=gkw[(iperm-1)*ny*nag+m,i+1]
+                                +py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+          
+                            // test = test + py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*na+(l-1)*ny+j,i];
+                        endo;
+                    elseif k1>=kmax;
+                        m=0;
+                        do until m==ny;
+                            m=m+1;
+                            gkw[(iperm-1)*ny*nag+(nag-1)*ny+m,i+1]=gkw[(iperm-1)*ny*nag+(nag-1)*ny+m,i+1]
+                                +py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                            
+                            // test = test + py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*na+(l-1)*ny+j,i];
+                        endo;
+                    else;
+                        j0=sumc(ag.<k1)+1;
+                        j0=minc(j0|nag);
+                        n0=(k1-ag[j0-1])/(ag[j0]-ag[j0-1]);
+                        m=0;
+                        do until m==ny;
+                            m=m+1;
+                            gkw[(iperm-1)*ny*nag+(j0-2)*ny+m,i+1]=gkw[(iperm-1)*ny*nag+(j0-2)*ny+m,i+1]
+                                +(1-n0)*py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                            gkw[(iperm-1)*ny*nag+(j0-1)*ny+m,i+1] = gkw[(iperm-1)*ny*nag+(j0-1)*ny+m,i+1]
+                                +n0*py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                            
+                           // test = test + py[j,m]*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*na+(l-1)*ny+j,i];
+                        endo;            
+                    endif;
+                endo; // a[l], l=1,..nag
+            endo;   // ye[j], j=1,..,ny
+        endo;       // iperm =1,2
+        // summing up the entries for ag[ia], ia=1,...,nag
+        kg01=reshape(gkw[1:nag*ny,i+1],nag,ny); 
+        kg02=reshape(gkw[nag*ny+1:2*nag*ny,i+1],nag,ny);
+        kg0 = kg01+kg02;
+        kg0=sumc(kg0');
+        gk[.,i+1]=kg0;
+        kgen[i+1]=kg0'*ag;  // check
+    endo;       // i=1,..,nw
+
+    i=nw;
+    iperm=0;
+    do until iperm==nperm;
+        iperm = iperm+1;
+        j=0;
+        do until j==ny;
+            j=j+1;
+            l=0;
+            do until l==nag;
+                l=l+1;
+                if ag[l]<=kmin; 
+                    k1=awopt[(iperm-1)*ny*na+j,i];
+                    labor=lopt[(iperm-1)*ny*na+j,i];
+                elseif ag[l]>=kmax;
+                    k1=awopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                    labor=lopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                else;
+                    j0=sumc(a.<ag[l])+1;
+                    j0=minc(j0|na);
+                    n0=(ag[l]-a[j0-1])/(a[j0]-a[j0-1]);
+                    k1 = (1-n0)*awopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*awopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                    labor = (1-n0)*lopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*lopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                endif;
+                
+                
+                
+                //
+                // distribution of earnings and income at age i
+                //
+                x = perm[iperm]*exp(ye[j])*ef[i]*w*labor;   // earnings 
+                y = x + (r-delta)*ag[l];                // income    
+        
+                if x<=0;
+                    gearn[1] = gearn[1] +  gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+          
+                elseif x>=earn[nearn];
+                    gearn[nearn] = gearn[nearn] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+             
+                else;   // linear interpolation between grid points
+                    j0=sumc(earn.<x)+1;
+                    j0=minc(j0|nearn);
+                    n0=(x-earn[j0-1])/(earn[j0]-earn[j0-1]);
+                    gearn[j0-1] = gearn[j0-1]+ (1-n0)*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+                    gearn[j0] = gearn[j0]+ n0*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i]/sumc(mass[1:nw]);
+                endif;      
+        
+                if y<0;
+                    gincome[1] = gincome[1] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                elseif y>=income[nearn];
+                    gincome[nearn] = gincome[nearn] + gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                else;
+                    j0=sumc(income.<y)+1;
+                    j0=minc(j0|nearn);
+                    n0=(y-earn[j0-1])/(earn[j0]-earn[j0-1]);
+                    gincome[j0-1] = gincome[j0-1]+ (1-n0)*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                    gincome[j0] = gincome[j0]+ n0*gkw[(iperm-1)*nag*ny+(l-1)*ny+j,i];
+                endif;
+                
+       
+                if k1<=kmin;
+                    gkr[1,1]=gkr[1,1]+sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                elseif k1>=kmax;
+                    gkr[nag,1]=gkr[nag,1]+sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                else;
+                    j0=sumc(ag.<k1)+1;
+                    n0=(k1-ag[j0-1])/(ag[j0]-ag[j0-1]);
+                    gkr[j0-1,1]=gkr[j0-1,1]+(1-n0)*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];
+                    gkr[j0,1]=gkr[j0,1]+n0*sp1[i]/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(l-1)*ny+j,i];     
+                endif;
+            endo; /* l */
+        endo; /* j */ 
+    endo;   // iperm=1,2
+    kgen[nw+1]=gkr[.,1]'*ag; 
+    nw+1~kgen[nw+1];
+
+
+    i=0;
+    do until i==nr-1;
+        i=i+1; i+nr;
+        l=0;
+        do until l==nag;
+            l=l+1;
+            if ag[l]<=kmin; 
+                k1=aropt[1,i];
+                c = cropt[1,i];
+            elseif ag[l]>=kmax;
+                k1=aropt[na,i];
+                c = cropt[na,i];
+            else;
+                j0=sumc(a.<ag[l])+1;
+                j0=minc(j0|na);
+                n0=(ag[l]-a[j0-1])/(a[j0]-a[j0-1]);
+                k1=(1-n0)*aropt[j0-1,i]+n0*aropt[j0,i];
+            endif;
+            
+            //
+            // distribution of income
+            //
+            y = pen + (r-delta)*ag[l];                // income 
+            
+            if y<0;
+                gincome[1] = gincome[1] + gkr[l,i];
+            elseif y>=income[nearn];
+                gincome[nearn] = gincome[nearn] + gkr[l,i];
+            else;
+                j0=sumc(income.<y)+1;
+                j0=minc(j0|nearn);
+                n0=(y-earn[j0-1])/(earn[j0]-earn[j0-1]);
+                gincome[j0-1] = gincome[j0-1]+ (1-n0)*gkr[l,i];
+                gincome[j0] = gincome[j0]+ n0*gkr[l,i];
+            endif;
+            
+            //
+            // dynamics of the distribution during retirement
+            //
+            if k1<=kmin;
+                gkr[1,i+1]=gkr[1,i+1]+sp1[i+nw]/(1+popgrowth0)*gkr[l,i];
+            elseif k1>=kmax;
+                gkr[nag,i+1]=gkr[nag,i+1]+sp1[i+nw]/(1+popgrowth0)*gkr[l,i];
+            else;
+                j0=sumc(ag.<k1)+1;
+                j0=minc(j0|nag);
+                n0=(k1-ag[j0-1])/(ag[j0]-ag[j0-1]);
+                gkr[j0-1,i+1]=gkr[j0-1,i+1]+(1-n0)*sp1[i+nw]/(1+popgrowth0)*gkr[l,i];
+                gkr[j0,i+1]=gkr[j0,i+1]+n0*sp1[i+nw]/(1+popgrowth0)*gkr[l,i];
+            endif;
+        endo; /* l */
+        kgen[i+nw+1]=gkr[.,i+1]'*ag;
+        i+nw+1~kgen[i+nw+1];
+        save kgen;
+    endo; // i =1,..,nr
+
+    gk=gk~gkr;
+    gk=gk/sumc(sumc(gk));
+    /* computation of the gini coefficient of capital distribution */
+    gk1=sumc(gk');
+    gini_wealth = ginid(ag,gk1);
+    "gini wealth: " gini_wealth;
+    gini_earnings = ginid(earn,gearn);
+    "gini earnings: " gini_earnings;
+    gini_income = ginid(income,gincome);
+    "gini income: " gini_income;
+    save gini_wealth, gini_earnings, gini_income;
+    
+
+//    "sumc(mass[1:nw])=sumc(sumc(gkw))?";
+//    sumc(mass[1:nw])~sumc(sumc(gkw));
+//    "sumc(mass[nw+1:nage])=sumc(sumc(gkr))?";
+//    sumc(mass[nw+1:nage]); sumc(sumc(gkr));
+//    wait;
+    
+    // total savings
+    omeganew=sumc(kgen)/sumc(mass);
+    ybar=production(kbar,nbar);
+    debt = bybar*ybar;
+    gbar = gybar*ybar;
+    omega = phi*omega + (1-phi)*omeganew;
+    knew = omeganew - debt;
+    kbar=phi*kold+(1-phi)*knew;
+
+// aggregate variablec L, Beq, C, mean working hours mean_labor
+    nnew = 0;
+    bequests = 0;
+    bigc = 0;
+    mean_labor=0;
+    cgen = zeros(nage,1);
+    lgen = zeros(nw,1);
+  
+// Residual: Euler equation         
+    Euler_res = zeros(nperm*nag*ny,nw);
+    Foc_res = zeros(nperm*nag*ny,nw);
+    Euler_res_old = zeros(nag,nr-1);
+  
+    i=0;
+    do until i==nw;
+        i=i+1;
+        iperm=0;
+        do until iperm==nperm;
+            iperm=iperm+1;
+            j=0;
+            do until j==ny;
+                j=j+1;
+                ia=0;
+                do until ia==nag;
+                    ia=ia+1;
+                    
+                    
+                    if ag[ia]<=kmin; 
+                        k1=awopt[(iperm-1)*ny*na+j,i];
+                        labor=lopt[(iperm-1)*ny*na+j,i];
+                        c = cwopt[(iperm-1)*ny*na+j,i];
+                    elseif ag[ia]>=kmax;
+                        k1=awopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                        labor=lopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                        c = cwopt[(iperm-1)*ny*na+(na-1)*ny+j,i];
+                    else;   // linear interpolation between grid points
+                        j0=sumc(a.<ag[ia])+1;
+                        j0=minc(j0|na);
+                        n0=(ag[ia]-a[j0-1])/(a[j0]-a[j0-1]);
+                        k1=(1-n0)*awopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*awopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                        labor=(1-n0)*lopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*lopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                        c = (1-n0)*cwopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*cwopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+                    endif;
+                    
+                    nnew = nnew + ef[i]*exp(ye[j])*perm[iperm]*labor*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i];
+                    mean_labor = mean_labor + labor/(sumc(mass[1:nw]))*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i];
+                    cgen[i] = cgen[i] + c*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i]/mass[i];
+                    lgen[i]= lgen[i] + labor*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i]/mass[i];
+                    bequests = bequests + k1*(1+(1-tauk)*(r-delta))*(1-sp1[i])/(1+popgrowth0)*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i];
+                    bigc = bigc + c*gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i];
+                    gwealth[ia] = gwealth[ia]+gkw[(iperm-1)*ny*nag+(ia-1)*ny+j,i];
+                    
+                    // computation of the Euler residual
+                    // 
+                    // (1+g_A)^eta u_{c,t} = beta phi^i E_t{ u_{c,t+1} [1+(1-tauk) (r-delta)] }
+                    //
+                    
+                    x=0;
+                    if i<nw;
+                        j1=0;
+                        do until j1==ny;
+                            j1=j1+1;
+                            x = x + beta1 * sp1[i]*py[j,j1]* (1+rb)* uc1(k1,iperm,j1,i+1);
+                        endo;
+                    else;
+                        x = beta1*sp1[i]*uc1(k1,1,1,i+1);
+                    endif;
+                    
+                    Euler_res[(iperm-1)*na*ny+(ia-1)*ny+j,i] = 1-x / ( ygrowth^(1-gam*(1-eta)) * uc(c,labor));
+                    x = uc(c,labor)*(1-taun-taup)/(1+tauc)*w*ef[i]*perm[iperm]*exp(ye[j]);
+                    Foc_res[(iperm-1)*na*ny+(ia-1)*ny+j,i] = 1 - ulabor(c,labor)/x;
+                                          
+                endo;
+            endo;
+        endo;
+    endo;
+    
+    i=0;
+    do until i==nr;
+        i=i+1;
+        ia=0;
+        do until ia==nag;
+            ia=ia+1;
+            
+            if ag[ia]<=kmin; 
+                k1=aropt[1,i];
+                c = cropt[1,i];
+            elseif ag[ia]>=kmax;
+                k1=aropt[na,i];
+                c = cropt[na,i];
+            else;
+                j0=sumc(a.<ag[ia])+1;
+                j0=minc(j0|na);
+                n0=(ag[ia]-a[j0-1])/(a[j0]-a[j0-1]);
+                k1=(1-n0)*aropt[j0-1,i]+n0*aropt[j0,i];
+                c=(1-n0)*cropt[j0-1,i]+n0*cropt[j0,i];
+            endif;
+            
+            labor=0;
+            if i<nr;
+                Euler_res_old[ia,i] = 1- beta1*sp1[nw+i]*(1+rb)*uc1(k1,1,1,i+nw+1)/ (ygrowth^(1-gam*(1-eta))*uc(c,labor));
+            endif;
+            
+            bequests = bequests + k1*(1+(1-tauk)*(r-delta))*(1-sp1[i+nw])/(1+popgrowth0)*gkr[ia,i];
+            bigc = bigc + c*gkr[ia,i];
+            gwealth[ia] = gwealth[ia]+gkr[ia,i];
+            cgen[nw+i] = cgen[nw+i]+ c*gkr[ia,i]/mass[nw+i];
+        endo;
+    endo;
+    
+    gini_wealth1 = ginid(ag,gwealth);
+    "gini wealth1: " gini_wealth1;        
+
+    "mean Euler residual young: " meanc(meanc(abs(Euler_res)));
+    "mean Euler residual old: " meanc(meanc(abs(Euler_res_old)));
+    "mean FOC labor residual: " meanc(meanc(abs(foc_res)));
+    //wait;
+
+
+    // tatonnement process to update L: simple dampening iterative scheme as described in Judd (1998), Section 3.9
+    
+    nbar=phi*nbar+(1-phi)*nnew;
+    taxes=taun*w*nbar+tauk*(r-delta)*kbar+tauc*bigc;    
+    // update of L, K, transfer, kshare, and pen
+    transfernew=taxes+bequests+debt*((1+popgrowth0)*ygrowth-(1+(1-tauk)*(r-delta))) - gbar;	
+	trbar=phi*trbar+(1-phi)*transfernew;
+    pennew=replacement_ratio*w*mean_labor;
+    // social security contributions are calculated so that the social security budget balances
+	taupnew=pennew*sumc(mass[nw+1:nage])/(w*nbar);
+	taup=phi*taup+(1-phi)*taupnew;
+    taunnew=taulbar-taup;
+    taun = phi*taun + (1-phi)*taunnew;
+    
+    "mean working hours: " mean_labor;
+
+endo;   /* q */
+
+
+"time elapsed: " etstr(hsec-h0);
+"I+C+G= " (delta+popgrowth0+(ygrowth-1)+popgrowth0*(ygrowth-1))*kbar+bigc+gbar;
+"Y = " ybar;
+wait;
+
+
+wm=gk1.*ag;
+wm=gk1~wm;
+
+we=(0~0|
+    0.05~0|
+    0.1~0|
+    0.2~0|
+    0.4~0.0174|
+    0.6~0.0572|
+    0.8~0.1343|
+    0.9~0.7949-0.1262-0.2395-0.2955|
+    0.95~0.1262|
+    0.99~0.2395|
+    1~1);
+
+we[2:rows(we)-1,2]=cumsumc(we[2:rows(we)-1,2]);
+  we=we|ones(rows(wm)-rows(we),2);
+    
+
+struct PlotControl myPlot;
+myPlot=PlotGetDefaults("XY");
+plotCanvasSize("mm",117|61,300);
+myPlot.lineColor="red"$|"blue"$|"black"$|"black";
+myPlot.lineThickness=3;
+myPlot.axesLabel.font="Charter";
+myPlot.Legend.font="Charter";
+myPlot.Legend.fontSize=20;
+myPLot.axesLabel.fontSize=20;
+myPlot.axes.font="Charter";
+myPlot.axesNumbers.font="Charter";
+myPlot.axesNumbers.fontSize=18;
+//myPlot.LineLegendText="f(x)=1/(1+x<sup>2</sup>)"$|"p<sub>5</sub>(x)"$|"p<sub>10</sub>(x)";
+plotSetGrid(&myPlot,"on");
+
+//PlotSetLineThickness(&myPlot,5);
+PlotSetXTicCount(&myPlot,8);
+//myPlot.axesLabel.font="Charter";
+//myPLot.axesLabel.fontSize=30;
+//myPlot.axes.font="Charter";
+//myPlot.axesNumbers.font="Charter";
+//myPlot.axesNumbers.fontSize=20;
+//myPlot.Legend.font="Charter";
+//myPlot.Legend.fontSize=20;
+//plotSetLegend(&myplot,"off");
+//myplot.lineLegendText="Model"$|"Wealth"$|"Equal distribution";
+plotSetLegend(&myplot,"Model"$|"US"$|"Equal distribution","top left");	
+plotSetYLabel(&myplot,"Proportion of wealth");
+plotSetXLabel(&myplot,"Proportion of households");
+plotSetTitle(&myplot,"Lorenz Curve of Wealth");
+plotSetTitle(&myplot,"");
+plotXY(myplot,cumsumc(wm[.,1])~we[.,1]~we[.,1],cumsumc(wm[.,2])/sumc(wm[.,2])~we[.,2]~we[.,1]);
+wait;
+save wm,we;
+
+earnshare=gearn.*earn;
+totalearn=gearn'*earn;
+rel_earnshare=earnshare/totalearn;
+earn=gearn~rel_earnshare;
+
+plotSetLegend(&myplot,"Model"$|"US"$|"Equal distribution","top left");	
+plotSetYLabel(&myplot,"Proportion of earnings");
+plotSetXLabel(&myplot,"Proportion of households");
+plotXY(myplot,cumsumc(earn[.,1])~ea[.,1]~ea[.,1],cumsumc(earn[.,2])/sumc(earn[.,2])~ea[.,2]~ea[.,1]);
+wait;
+
+earn=earn|(0~0);
+plotSetLegend(&myplot,"Equal distribution"$|"Earnings"$|"Wealth","top left");	
+plotSetYLabel(&myplot,"Proportion of earnings/wealth");
+plotSetXLabel(&myplot,"Proportion of households");
+plotSetTitle(&myplot,"");
+plotSetTitle(&myplot,"");
+plotXY(myplot,we[.,1]~cumsumc(wm[.,1])~cumsumc(earn[.,1]),we[.,1]~cumsumc(wm[.,2])/sumc(wm[.,2])~cumsumc(earn[.,2])/sumc(earn[.,2]));
+wait;
+
+plotSetGrid(&myPlot,"off");
+plotSetLegend(&myplot,"off");
+plotSetYLabel(&myplot,"Average assets");
+plotSetXLabel(&myplot,"Generation");
+plotSetTitle(&myplot,"");
+plotXY(myplot,seqa(21,1,nw+nr+1),((kgen./mass)|0));
+wait;
+
+plotSetGrid(&myPlot,"off");
+plotSetLegend(&myplot,"off");
+plotSetYLabel(&myplot,"Average consumption");
+plotSetXLabel(&myplot,"Generation");
+plotSetTitle(&myplot,"");
+plotXY(myplot,seqa(21,1,nage),cgen);
+wait;
+
+plotSetGrid(&myPlot,"off");
+plotSetLegend(&myplot,"off");
+plotSetYLabel(&myplot,"Average labor");
+plotSetXLabel(&myplot,"Generation");
+plotSetTitle(&myplot,"");
+plotXY(myplot,seqa(21,1,nw),lgen);
+wait;
+
+
+"capital stock: " kbar;
+"taun: " taun;
+"replacement ratio: " replacement_ratio;
+"pensions: " pen;
+"r: " r;
+wait;
+
+
+struct PlotControl myPlot;
+myPlot=PlotGetDefaults("XY");
+plotCanvasSize("mm",117|61,300);
+myPlot.lineColor="red"$|"blue"$|"black"$|"black";
+myPlot.lineThickness=3;
+myPlot.axesLabel.font="Charter";
+myPlot.Legend.font="Charter";
+myPlot.Legend.fontSize=20;
+myPLot.axesLabel.fontSize=20;
+myPlot.axes.font="Charter";
+myPlot.axesNumbers.font="Charter";
+myPlot.axesNumbers.fontSize=18;
+//myPlot.LineLegendText="f(x)=1/(1+x<sup>2</sup>)"$|"p<sub>5</sub>(x)"$|"p<sub>10</sub>(x)";
+plotSetGrid(&myPlot,"off");
+
+//PlotSetLineThickness(&myPlot,5);
+PlotSetXTicCount(&myPlot,8);
+//myPlot.axesLabel.font="Charter";
+//myPLot.axesLabel.fontSize=30;
+//myPlot.axes.font="Charter";
+//myPlot.axesNumbers.font="Charter";
+//myPlot.axesNumbers.fontSize=20;
+//myPlot.Legend.font="Charter";
+//myPlot.Legend.fontSize=20;
+plotSetLegend(&myplot,"off");
+//myplot.lineLegendText="Model"$|"Wealth"$|"Equal distribution";
+//plotSetLegend(&myplot,"Model"$|"US"$|"Equal distribution","top left");	
+plotSetYLabel(&myplot,"Density");
+plotSetXLabel(&myplot,"Individual wealth");
+plotSetTitle(&myplot,"");
+gwealth1 = gwealth/(ag[2]-ag[1]);   // normalize survace under curve to one
+plotXY(myplot,ag,gwealth1);
+wait;
+
+@ ------------------------------------------------------
+
+Procedures:
+
+u           -- utility function
+uc          -- marginal utility of consumption
+
+rvalue(k,t) -- value function in time t at point k, linearly
+               interpolated
+wvalue(k,t) -- of the worker
+value1      -- bellman equation for retired
+value2      -- bellman equation for worker
+golden      -- golden section search, Press et al., 10.1
+
+
+------------------------------------------------------  @
+
+
+// marginal utility from consumption
+proc uc(c,l);
+	local y;
+	y=gam*c^(gam*(1-eta)-1)*(1-l)^((1-gam)*(1-eta));
+	retp(y);
+endp;
+
+// marginal disutility from labor
+proc ulabor(c,l);
+	local y;
+    y = (1-gam)*c^(gam*(1-eta))*(1-l)^((1-gam)*(1-eta)-1);
+	retp(y);
+endp;
+
+// marginal utility from consumption next period given a',iperm,j,i
+proc uc1(a1,iperm,j,i);
+    local y,c1,labor,j0,n0;
+    if i<=nw;
+        if a1<=kmin; 
+            c1 = cwopt[(iperm-1)*na*ny+j,i];
+            labor = lopt[(iperm-1)*na*ny+j,i];
+        elseif a1>=kmax;
+            c1 = cwopt[(iperm-1)*na*ny+(na-1)*ny+j,i];
+            labor =  lopt[(iperm-1)*na*ny+(na-1)*ny+j,i];
+        else;
+            j0=sumc(a.<a1)+1;
+            j0=minc(j0|na);
+            n0=(a1-a[j0-1])/(a[j0]-a[j0-1]);
+            c1 = (1-n0)*cwopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*cwopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+            labor = (1-n0)*lopt[(iperm-1)*ny*na+(j0-2)*ny+j,i]+n0*lopt[(iperm-1)*ny*na+(j0-1)*ny+j,i];
+        endif;
+    else;
+        labor = 0;
+        if a1<=kmin; 
+            c1 = cropt[1,i-nw];
+        elseif a1>=kmax;
+            c1 = cropt[na,i-nw];
+        else;
+            j0=sumc(a.<a1)+1;
+            j0=minc(j0|na);
+            n0=(a1-a[j0-1])/(a[j0]-a[j0-1]);
+            c1=(1-n0)*cropt[j0-1,i-nw]+n0*cropt[j0,i-nw];
+        endif;
+    endif;
+    retp(uc(c1,labor));
+endp;
+
+
+// linear interpolation of next-period value function at a'=k in period t
+proc rvalue(k,t);
+    local k0,n1,n2;
+    k0=k/kmax*(na-1)+1;
+    n2=floor(k0);
+    n1=k0-n2;
+    if k<=0; retp(vr[1,t]-(1-k0)*(vr[2,t]-vr[1,t])); endif;
+    if k>=kmax; retp(vr[na,t]); endif;
+    retp((1-n1)*vr[n2,t]+n1*vr[n2+1,t]);
+endp;
+
+proc wvalue(k,t);
+    local k0,n1,n2,r,ww;
+    k0=k/kmax*(na-1)+1;
+    n2=floor(k0);
+    n1=k0-n2;
+    ww=0;
+    if k<=0; 
+        r=0;
+        do until r==ny;
+            r=r+1;
+            ww=ww+py[j,r]*(vw[(iperm-1)*ny*na+r,t]-(1-k0)*(vw[(iperm-1)*ny*na+na+r,t]-vw[(iperm-1)*ny*na+r,t])); 
+        endo;
+    elseif k>=kmax; 
+        r=0;
+        do until r==ny;
+            r=r+1;
+            ww=ww+py[j,r]*vw[(iperm-1)*ny*na+(na-1)*ny+r,t]; 
+        endo;
+    else;
+        r=0;
+        do until r==ny;
+            r=r+1;
+            ww=ww+py[j,r]*((1-n1)*vw[(iperm-1)*ny*na+(n2-1)*ny+r,t]+n1*vw[(iperm-1)*ny*na+n2*ny+r,t]); 
+        endo;
+    endif;
+    retp(ww);
+endp;
+
+// value function of retried with wealth a=a[l] and a'=x
+proc value1(x);
+    local c;
+    c=(1+(1-tauk)*(r-delta))*a[l]+pen+trbar-ygrowth*x;
+    c=c/(1+tauc);
+    if c<=0; retp(-1e10); endif;
+    retp(u(c,0)+ygrowth^(gam*(1-eta))*sp1[nw+i]*beta1*rvalue(x,i+1));
+endp;
+
+proc value2(x);
+    local y,labor,jcode,c,k0;
+    k0=a[l];
+//  y = varput(k0,"k0");  
+//  y = varput(x,"k1");    
+    glo = k0|x;
+    labor = optimal_labor(glo);
+   // "labor: " labor;
+   // {labor,jcode}=FixVMN(laborinitial,&optimal_labor1,glo);
+   // if abs(optimal_labor1(labor,glo))>tol;
+        //"optimal_labor not equal zero"; wait;
+   // endif;
+   // "labor1: " labor;
+    //wait;
+    if labor<0;
+        labor=0;
+    endif;
+    if labor>labormax;
+        labor=labormax;
+    endif;
+    
+    
+    
+    c=(1+(1-tauk)*(r-delta))*k0+(1-taun-taup)*w*ef[i]*exp(ye[j])*perm[iperm]*labor+trbar-ygrowth*x;
+    c=c/(1+tauc);
+    if c<=0; retp(-1e10); endif;
+    // computation of optimal labor supply for a=a[l] and a'=x    
+        
+    if i==nw;
+        retp(u(c,labor)+ygrowth^(gam*(1-eta))*sp1[i]*beta1*rvalue(x,1));
+    else;
+        retp(u(c,labor)+ygrowth^(gam*(1-eta))*sp1[i]*beta1*wvalue(x,i+1));
+    endif;
+endp;
+
+
+/* Procedure zur Berechnung vom Minimum - Golden Section Search
+   Inputs:  &f  Funktion, f�r die das Minimum bestimmt werden soll
+            0,1,2 stuetzstellen mit x0<x1<x2
+   Output:      minimum
+   Remark:      Siehe auch press et al., chapter 10.1 */
+
+proc golden(&f,ay,by,cy,tol);
+    local f:proc,x0,x1,x2,x3,xmin,r1,r2,f1,f2;
+    r1=0.61803399; r2=1-r1;
+    x0=ay;
+    x3=cy;
+    if abs(cy-by)<=abs(by-ay);
+        x1=by; x2=by+r2*(cy-by);
+    else;
+        x2=by; x1=by-r2*(by-ay);
+    endif;
+    f1=-f(x1);
+    f2=-f(x2);
+    do until abs(x3-x0)<=tol*(abs(x1)+abs(x2));
+        if f2<f1;
+            x0=x1;
+            x1=x2;
+            x2=r1*x1+r2*x3;
+            f1=f2;
+            f2=-f(x2);
+        else;
+            x3=x2;
+            x2=x1;
+            x1=r1*x2+r2*x0;
+            f2=f1;
+            f1=-f(x1);
+        endif;
+    endo;
+    if f1<=f2;
+        xmin=x1;
+        else;
+        xmin=x2;
+    endif;
+    retp(xmin);
+endp;
+
+
+/* procedue for the discrete approximation of an AR(1) process */
+/* input: n - scalar, number of values for the simulaton
+          x0 - scalar, initial value, 1<x0<NN
+          a - autoregression coefficient
+          s2 - scalar, variance of the disturbance epsilon
+          NN - scalar, number of grid points
+          m - scalar, spread parameter, e.g. m=3
+   output: (n,1) vector
+*/
+
+proc (2) = armc(n,x0,a,s2,NN,m);
+    local f1,f2,i,ix,p,s,sy,w,y;
+    sy=sqrt(s2/(1-a^2));
+    y=seqa(-m*sy,(2*m*sy)/(NN-1),NN);
+    s=sqrt(s2);
+    w=y[2]-y[1];
+    f1=zeros(NN,1)~cdfn((y[2:NN]'-a*y-w/2)/s);
+    f2=cdfn((y[1:NN-1]'-a*y+w/2)/s)~ones(NN,1);
+    p=f2-f1;
+    ix=zeros(n,1);
+    ix[1]=x0;
+    i=1;
+    do until i==n;
+        i=i+1;
+        ix[i]=rndintw(1,p[ix[i-1],.]');
+    endo;
+    retp(y[ix],p);
+endp;
+
+proc rndintw(n,p);
+    local k,u;
+    k=rows(p);
+    u=rndu(n,1);
+    retp(subscat(rndu(n,1),cumsumc(p),seqa(1,1,k)));
+endp;
+
+/* GraphSettings: Changes Gauss' default initialization of graphic routines
+**
+** Usage: GraphSettings;
+*/
+  
+proc(0)=GraphSettings;
+
+ external matrix  _pltype, _ptitlht, _pnumht,
+         _paxht, _pmcolor, _plwidth, _pcsel;
+ external proc GraphSet;
+ GraphSet;
+   _pdate="";        @ do not plot date               @
+  _pltype=6;         @ solid lines only               @
+ _plwidth=4;         @ line width always 4            @
+   _paxht=0.15;      @ size of axis labels            @        
+  _pnumht=0.15;      @ size of axis numbering         @
+ _ptitlht=0.20;      @ size of titles                 @
+ _pmcolor={0,        @ color of axis: black           @
+           0,        @ color of axis' numbers         @
+           0,        @ color of x-axis label          @
+           0,        @ color of y-axis label          @
+           0,        @ color of z-axis label          @
+           0,        @ color of title                 @
+           0,        @ color of boxes                 @
+           0,        @ color of date and author       @
+           15};      @ background color:        white @
+   _pcsel={0,        @ color of first line: black     @
+           1,        @ color of second line: dark blue@
+           2,        @ color of third line: green     @
+           4,        @ color of fourth line: red      @
+           3,        @ color of fifth line: light blue@
+          10,        @ color of sixth line: light green@
+          8};        @ color of seventh line: dark grey@
+          
+retp;
+endp;           
+
+
+/* computes the gini for distribution where x has measure g(x) */
+proc ginid(x,g);
+    local xmean,ng,f,gini,i,y;	
+    ng=rows(x);
+    x=maxc(x'|zeros(1,ng));
+	xmean=x'*g;
+    y=(x~g);
+    y=sortc(y,1);
+    x=y[.,1];
+    g=y[.,2];
+    f=zeros(ng,1);  /* accumulated frequency */
+    f[1]=g[1]*x[1]/xmean;
+	gini=1-f[1]*g[1];
+    i=1;
+    do until i==ng;
+        i=i+1;
+        f[i]=f[i-1]+g[i]*x[i]/xmean;
+        gini=gini-(f[i]+f[i-1])*g[i];
+	endo;
+    retp(gini);
+endp;
+
+proc wage(k,n);
+    local y;
+    y= (1-alpha)*k^alpha*n^(-alpha);
+    retp(y);
+endp;
+
+proc interest(k,n);
+    local y;
+    y=alpha*k^(alpha-1)*n^(1-alpha);
+    retp(y);
+endp;
+
+
+proc production(k,n);
+    local y;
+    y=k^(alpha)*n^(1-alpha);
+    retp(y);
+endp;
+
+// instantaneous utility
+proc u(c,n);
+	local y;
+    if eta>1;
+        y=( c^gam*(1-n)^(1-gam) )^(1-eta);
+        y=y/(1-eta);
+    elseif eta==1;
+        y= gam*ln(c)+(1-gam)*ln(1-n);
+    else;
+        "eta " eta;
+        "only implemented for eta>=1";
+        wait;
+    endif;
+	retp(y);
+endp;
+
+proc optimal_labor(yglo);
+    local labor,a1,w0;
+    //a1=varget("k1");
+    a1 = yglo[2];
+    
+    w0=(1-taun-taup)*w*ef[i]*perm[iperm]*exp(ye[j]);
+    labor = gam-((1+(1-tauk)*(r-delta))*a[l]+trbar-ygrowth*a1)*(1-gam)/w0;
+    
+    retp(labor);
+endp;
+
+
+proc optimal_labor1(labor,yglo);
+    local y,c,a1;
+    //a1=varget("k1");
+    a1 = yglo[2];
+    c=(1+(1-tauk)*(r-delta))*a[l]+(1-taun-taup)*w*ef[i]*exp(ye[j])*perm[iperm]*labor+trbar-ygrowth*a1;
+    c=c/(1+tauc);
+    y= (1-taun-taup)/(1+tauc)*w*ef[i]*perm[iperm]*exp(ye[j])*uc(c,labor)-ulabor(c,labor);
+    retp(y);
+endp;

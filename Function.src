@@ -1,0 +1,366 @@
+@ --------------------------------------- Function.src -------------------------------------
+    
+    25 January 2008
+    Alfred Maussner
+    Collection of routines for function approximation.
+
+    LIP      : Linear Interpolation
+    BLIP     : Bilinear Interpolation
+    CSpline  : Compute the second derivative used in cubic interpolation
+    SPlint   : cubic interpolation
+    ChebCoef : Chebyshev regression
+    ChebEval1: Evaluate Chebyshev Polynomial in one dimension
+
+    
+
+-------------------------------------------------------------------------------------------- @
+
+@ --------------------------------- LIP --------------------------------------------
+
+    25 January 2008
+    Alfred Maussner
+
+    Purpose: given a function y=f(x) tabulated in xvec and yvec and a point x0,
+             return the function value y0=f(x0) obtained from linear interpolations
+             between x1<x<x2.
+
+    Usage: y0=LIP(xvec,yvec,x0);
+
+   Input:  xvec: n by 1 vector, the tabulated values of the independent variable x
+           yvec: n by 1 vector, the tabulated values of the dependent variable y
+             x0: m by 1 vector, the values of the independent variable for which y0 is
+                 to be computed.
+
+   Output:   y0: m by 1 vector, see above.
+
+------------------------------------------------------------------------------------ @
+
+proc(1)=LIP(xvec,yvec,x0);
+
+    local n, m, j, k, y0;
+    
+    n=rows(xvec);
+    m=rows(x0);
+    y0=zeros(m,1);
+
+    for k (1,m,1);
+        if (x0[k]<xvec[1]) or (x0[k]>xvec[n]); ?"Input out of grid. Procedure will return a missing value. Press any key"; wait; retp(miss(1,1)); endif;
+        if x0[k]==xvec[1];
+            y0[k]=yvec[1]; 
+        elseif x0[k]==xvec[n];
+            y0[k]=yvec[n];
+        else;
+            j=sumc(xvec.<=x0[k]); @ this determines the lower bracket for x0 @
+        y0[k]=yvec[j]+((yvec[j+1]-yvec[j])/(xvec[j+1]-xvec[j]))*(x0[k]-xvec[j]);
+        endif;
+    endfor;
+    retp(y0);
+    
+endp;
+
+
+@ --------------------------------------- BLIP ------------------------------------------------
+
+   2 February 2008
+   Alfred Maussner
+ 
+   Purpose: Bilinear Interpolation as given by Formulas (3.6.1) through (3.6.5)
+            in Press et al. (1992), S. 116f.
+
+   Usage: z=BLIP(xvec,yvec,zmat,x,y)
+ 
+  Input: xvec = n by 1, vector, the grid of variable x
+         yvec = m by 1, vector, the grid of variable y
+         zmat = n by m matrix, with tabulated function values at
+                      z(i,j)=f(x(i),y(j), i=1, ..., n, j=1, ...,m
+            x = scalar,  the x coordinate
+            y = scalar,  the y coordiante
+ 
+  Output: z, the interpolated value of f(x,y)
+
+  Remarks:  the elements in xvec and yvec must satisfy xvec[i]<xvec[i+1] for all i
+            and similar for y
+       
+------------------------------------------------------------------------------------------------ @
+
+proc(1)=BLIP(xvec,yvec,zmat,x,y);
+
+    local n, m, i, j, z, t, u;
+
+n=rows(xvec); m=rows(yvec);
+z=zeros(4,1);
+
+@ first, locate the square that surrounds (x,y) @
+if (x<xvec[1]) or (x>xvec[n]); ?"x outside of grid! Program stops. Press any key";x;wait; retp(miss(1,1)); endif;
+if (y<yvec[1]) or (y>yvec[m]); ?"y outside of grid! Program stops Press any key"; y;wait; retp(miss(1,1)); endif;
+
+i=sumc(xvec.<=x);
+j=sumc(yvec.<=y);
+
+if (i==n) and (j==m);
+    retp(zmat[n,m]);
+elseif (i==n) and (j<m);
+    u=(y-yvec[j])/(yvec[j+1]-yvec[j]);
+    retp((1.-u)*zmat[n,j]+u*zmat[n,j+1]);
+elseif (i<n) and (j==m);
+    t=(x-xvec[i])/(xvec[i+1]-xvec[i]);
+    retp(t*zmat[i+1,m]+(1.-t)*zmat[i,m]);
+else;
+    t=(x-xvec[i])/(xvec[i+1]-xvec[i]);
+    u=(y-yvec[j])/(yvec[j+1]-yvec[j]);
+    retp((1.-t)*(1.-u)*zmat[i,j]+t*(1.-u)*zmat[i+1,j]+t*u*zmat[i+1,j+1]+(1.-t)*u*zmat[i,j+1]);         
+endif;
+endp;
+
+
+@ ------------------------------------ CSpline --------------------------------------------
+
+
+   25 January 2008
+   Alfred Maussner
+
+   Purpose:   Computes the second derivatives for the CUBIC SPLINE APPROXIMATION of
+              a function y=f(x). You must first run CSpline and then CSplint
+              to evaluate the function.
+
+   Useage:  y2=CSpline(x,y,cmethod,yp);
+
+
+   Input:      x := n by 1 vector that stores the tabulated values of the independent variable
+               y := n by 1 vector that stores the tabulated values of the dependent variable y=f(x)
+          cmethod:= 1, 2, or 3:
+                    if =1:  natural cubic spline, 
+                    if =2:  secant hermite spline
+                    if =3:  first derivaties at x[1] and x[n] are specified as yp[1] and yp[2]
+               yp:= 2 by 1 vector, as just defined
+
+   Output:     y2:= n by 1 vector, the second derivatives at x[i], i=1,n
+
+   Remarks: The code is based on the Fortran subroutine spline in Press et al.(1992), p. 109.
+
+------------------------------------------------------------------------------------------------- @
+
+proc(1)=CSpline(x,y,cmethod,yp);
+
+    local n, i, k, p, qn, sig, un, u, y2;
+
+    /* Initializing */
+    n=rows(x);
+    u=zeros(n,1);
+    y2=zeros(n,1);
+
+    if cmethod==1;  @ natural cubic spline, i.e., y2[1]=y2[n]=0 @
+
+            y2[1]=0.0;
+             u[1]=0.0;
+               qn=0.0;
+               un=0.0;
+
+    endif;
+
+    if cmethod==2;  @ secant hermite spline, i.e., set the first derivative f' at x[1] and x[2] equal to the secant @
+
+            yp[1]=(y[2]-y[1])/(x[2]-x[1]);
+            yp[2]=(y[n]-y[n-1])/(x[n]-x[n-1]);
+            y2[1]=-0.5;
+            u[1]=(3./(x[2]-x[1]))*((y[2]-y[1])/(x[2]-x[1])-yp[1]);
+            qn=0.5;
+            un=(3./(x[n]-x[n-1]))*(yp[2]-(y[n]-y[n-1])/(x[n]-x[n-1]));
+
+    endif;
+
+    if cmethod==3;  @ set second derivative to the values specified in yp @
+
+            y2[1]=-0.5;
+            u[1]=(3./(x[2]-x[1]))*((y[2]-y[1])/(x[2]-x[1])-yp[1]);
+            qn=0.5;
+            un=(3./(x[n]-x[n-1]))*(yp[2]-(y[n]-y[n-1])/(x[n]-x[n-1]));
+
+    endif;
+
+    for i (2,n-1,1);
+
+        sig=(x[i]-x[i-1])/(x[i+1]-x[i-1]);
+        p=sig*y2[i-1]+2;
+        y2[i]=(sig-1.0)/p;
+         u[i]=(6.0*((y[i+1]-y[i])/(x[i+1]-x[i])-(y[i]-y[i-1])/(x[i]-x[i-1]))/(x[i+1]-x[i-1])-sig*u[i-1])/p;
+
+    endfor;
+
+    y2[n]=(un-qn*u[n-1])/(qn*y2[n-1]+1.0);
+   
+    for k (n-1,1,-1);
+
+        y2[k]=y2[k]*y2[k+1]+u[k];
+
+    endfor;
+
+    retp(y2);
+
+endp;
+
+
+@ --------------------------------------------------- CSplint ----------------------------------------
+
+
+   25 January 2009
+   Alfred Maussner
+    
+   Purpose: Computes the CUBIC SPLINE APPROXIMATION of a function y=f(x) being
+            tabulated in the vectors x and y. y2 must be computed from x and y 
+            via a first call to CSpline.
+
+   Useage: Call y0=CSplint(x,y,y2,gmethod,x0);
+
+   Input:       x := n by 1 vector, the tabulated values of the independent variable
+                y := n by 1 vector, the tabulated values of the dependent variable
+               y2 := n by 1 vector, the second derivative of f at x (computed from CSpline)
+           gmethod:= 1 or 2
+                     if =1: equally spaced nodes x[1]<x[2]<...<x[n]                     
+                     if =2: bisection to locate x0[i]
+               x0 := m by 1 vector, points at which the function is to be approximated
+
+ Output:        y0:= m by 1 vector, the approximate values of f(x0);
+
+ Remarks: Code is based on the Fortran routine splint from Press et al. (1992), p.110.
+
+-------------------------------------------------------------------------------------------------- @
+
+proc(1)=Splint(x,y,y2,gmethod,x0);
+
+      local k,klo, khi, i, a, b, h, n, m, y0;
+
+      n=rows(x);
+      m=rows(x0);
+     y0=zeros(m,1);
+      
+      for i (1,m,1);
+         if (x0[i]<x[1]) or (x0[i]>x[n]); ?"x0 out of grid! The procedure stops and returns a missing value. Press any key";wait; retp(miss(1,1)); endif;
+         if (x0[i]==x[1]);
+             y0[i]=y[1];
+         elseif (x0[i]==x[n]);
+             y0[i]=y[n];
+         else;
+            if gmethod==1;
+               klo=sumc(x.<=x0[i]);
+               khi=klo+1;
+            endif;
+            if gmethod==2;  @ bisection @
+                klo=1;
+                khi=n;
+                do while ((khi-klo)>.1);
+                    k=(khi+klo)/2;
+                    if (x[k]>x0[i]); khi=k;  else;  klo=k;  endif;
+                endo;
+            endif;
+        
+            h=x[khi]-x[klo];
+            a=(x[khi]-x0[i])/h;
+            b=(x0[i]-x[klo])/h;
+           y0[i]=a*y[klo]+b*y[khi]+((a^3-a)*y2[klo]+(b^3-b)*y2[khi])*(h^2)/6;
+
+         endif;
+
+     endfor;
+
+     retp(y0);
+
+endp;
+
+@ -------------------------------- ChebCoef ------------------------------------------------------------
+
+   Purpose: uses Chebyshev regression to compute the coefficients of a n-th degree
+            approximation of f using Chebyshev polynomials.
+
+   Usage:  alpha=ChebCoef(&f,n,m,d)
+
+
+   Input:  &f, pointer to the function that is to be approximated
+           n,  integer, degree of the polynomial
+           m,  integer, number of data points to be used in the regression
+           d,  2 times 1 vector, d[1] lower, d[2] upper bound of the interval over which f is to be approximated
+
+   Output: alpha:= n times 1 vector of coefficients
+
+--------------------------------------------------------------------------------------------------------- @
+
+proc(1)=ChebCoef(&f,n,m,d);
+
+
+   local xbar, zbar, ybar, alpha, k, i, t0, t1, t2, f: proc;
+
+
+   /* Test for proper input */
+   if m<n; ?"There must be at least as many data points as there are coefficients to compute";
+           ?"Procedure puts m=n";
+           m=n;
+   endif;
+
+  k=seqa(1,1,m);
+
+  /* Compute zeros */
+  xbar=cos( ((2*k-1)/(2*m))*pi );
+
+  /* adjust to the [a,b] interval */
+  zbar=(xbar+1)*(d[2]-d[1])*(1/2) + d[1];
+
+  /* Compute y */
+  ybar=f(zbar);
+
+  /* Compute coefficients */
+  t0=ones(m,1);
+  t1=xbar;
+  t2=2*(xbar.*t1)-t0;
+
+  alpha=zeros(n,1);
+  alpha[1]=(1/m)*sumc(ybar);
+  alpha[2]=(2/m)*(ybar'*t1);
+  i=3;
+  do until i>n;     
+      alpha[i]=(2/m)*(ybar'*t2);
+      t0=t1;
+      t1=t2;
+      t2=2*(xbar.*t1)-t0;
+     i=i+1;
+  endo;
+
+retp(alpha);
+endp;
+
+
+@ ----------------------------------------------- ChebEval1 ---------------------------------------------------
+
+   Purpose: Evaluate Chebyshev polynomial
+
+   Usage: y=ChebEval1(alpha,z,d);
+
+   Input:  alpha, n times 1 vector of coefficients
+               z, m times 1 vector of points at which the polynomial is to be evaluated
+               d, 2 times 1 vector lower and upper bound of the interval
+ 
+    ouput:     y, n times 1  vector, y[i] is the values of the Chebyshev polynomial at x[i]
+
+--------------------------------------------------------------------------------------------------------------- @
+
+proc(1)=ChebEval1(alpha,z,d);
+
+    local y, i, m, n, t, x;
+
+    n=rows(alpha);
+    m=rows(z);
+    x=( (2*(z-d[1]))./(d[2]-d[1])) - 1; @ Map into [-1,1] @
+    y=zeros(m,1);
+    t=zeros(m,n);
+    t[.,1]=ones(m,1);
+    t[.,2]=x;
+    i=2;
+    do until i>(n-1);
+       t[.,i+1]=2*x.*t[.,i]-t[.,i-1];
+              i=i+1;
+    endo;
+
+    y=t*alpha;
+
+retp(y);
+
+endp;

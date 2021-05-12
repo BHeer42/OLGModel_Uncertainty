@@ -1,0 +1,1127 @@
+@ ----------------------------- Ch8_Toolbox.src -----------------------------
+
+  This file contains Gauss procedures introduced in Chapter 8 of Heer/Maussner.
+
+  ChebEval1: Evaluate a Chebyshev polynomial in one independent variable
+
+  ChebEval2: Evaluate a Chebyshev polynomial with two independent variables (complete polynomial case)
+
+  ChebEval3: Evaluate a Chebyshev polynomial with two independent variables (tensor product base)
+
+  ChebCoef: Obtain Chebyshev approxiamtion from a regression
+
+  QuasiNewton: Function minimization using a quasi Newton method with BFGS update
+               and line search
+
+  QNStep     : Line search for QuasiNewton
+
+  GradTest   : computes relative gradient (used to test whether the algorithm is near a minimizer)
+  
+  MinStep    : computes minimal step size
+
+  ParTest    : computes relative change of parameter (used to test whether the algorithm converged)
+
+  GSearch1   : Function minimization using a genetic search algorithm  
+
+  CDJac      : Central difference Jacobian
+  
+  FixvMN1    : Non-Linear Equations Solver
+ 
+  LSolve     : Used by FixvMN1
+
+  NRStep     : Line search for FixvMN1
+
+  GC_Int1    : Gauss-Chebyshev quadrature of f(x)
+
+  GC_Int2    : Gauss-Chebyshev quadrature of f(x,y)
+
+----------------------------------------------------------------------------- @
+
+
+@ ----------------------------------------------- ChebEval ---------------------------------------------------
+
+   Purpose: Evaluate Chebyshev polynomial
+
+   Usage: y=ChebEval1(alpha,z,d);
+
+   Input:  alpha, n times 1 vector of coefficients
+               z, m times 1 vector of points at which the polynomial is to be evaluated
+               d, 2 times 1 vector lower and upper bound of the interval
+ 
+    ouput:     y, n times 1  vector, y[i] is the values of the Chebyshev polynomial at x[i]
+
+--------------------------------------------------------------------------------------------------------------- @
+
+proc(1)=ChebEval1(alpha,z,d);
+
+    local y, i, m, n, t, x;
+
+    n=rows(alpha);
+    m=rows(z);
+    x=( (2*(z-d[1]))./(d[2]-d[1])) - 1; @ Map into [-1,1] @
+    y=zeros(m,1);
+    t=zeros(m,n);
+    t[.,1]=ones(m,1);
+    t[.,2]=x;
+    i=2;
+    do until i>(n-1);
+       t[.,i+1]=2*x.*t[.,i]-t[.,i-1];
+              i=i+1;
+    endo;
+
+    y=t*alpha;
+
+retp(y);
+
+endp;
+
+@ -------------------------------- Chebeval2 -----------------------------------------------------------
+
+  Purpose: Evaluate a Chebyshev polynomial in two independent variables, z1 and z2, 
+           using a complete polynomial
+
+  Usage: y=ChebEval2(avec,z,p,d);
+
+  Input: avec := (p+1)*(p+2)/2 times 1 vector of coefficients
+         z    := 2 times 1 vector, z[1]=z1, z[2]=z2 scalar, the value of the first independent variable         
+         p    := integer, the order of the complete polynomial
+         d    := 2 times 2 matrix, d[1,.] lower and upper bounds of z1,
+                                   d[2,.] lower and upper bounds of z2
+
+  Output: y   := scalar, the value of the polynomial at (z1,z2)
+
+------------------------------------------------------------------------------------------------------ @
+
+proc(1)=ChebEval2(avec,z,p,d);
+
+  local i, j, k, y, x, t1, t2;
+
+  /* check consistency */
+  if rows(avec)/=(p+1)*(p+2)/2; 
+      ?"Incorrect number of coefficients";
+      ?"Press any key";wait;
+       retp(miss(1,1));
+  endif;
+
+  p=p+1;
+
+  x=zeros(2,1);
+  x[1]=( (2*(z[1]-d[1,1]))./(d[1,2]-d[1,1])) - 1; @ Map z1 into [-1,1] @
+  x[2]=( (2*(z[2]-d[2,1]))./(d[2,2]-d[2,1])) - 1; @ Map z2 into [-1,1] @
+
+  t1=zeros(p,1);t1[1]=1; t1[2]=x[1];
+  t2=zeros(p,1);t2[1]=1; t2[2]=x[2];
+  i=3;
+  do until i>p;
+     t1[i]=2*x[1]*t1[i-1]-t1[i-2];
+     t2[i]=2*x[2]*t2[i-1]-t2[i-2];
+         i=i+1;
+  endo;
+
+  i=1;k=1;y=0;
+  do until i>p;
+     j=1;
+     do until j>(p+1-i);
+        y=y+avec[k]*t1[j]*t2[i];
+        j=j+1;
+        k=k+1;
+     endo;
+     i=i+1;
+  endo;
+
+retp(y);
+
+endp;
+
+  
+@ -------------------------------- Chebeval3 -----------------------------------------------------------
+
+  Purpose: Evaluate a Chebyshev polynomial in two independent variables using a tensor product base
+
+  Usage: y=ChebEval2(avec,z,p,d);
+
+  Input: avec := p1 times p2 matrix of coefficients
+         z    := 2 times 1 vector, z[1] value of z1, z[2] value of z2         
+         p    := 2 times 1 vector, p[1] order of polynomial for z1,
+                                   p[2] order of polynomial for z2
+         d    := 2 times 2 vector, first row:  lower and upper limit of z1
+                                   second row: lower and upper limit of z2
+
+  Output: y   := scalar, the value of the polynomial at (x1,x2)
+
+------------------------------------------------------------------------------------------------------ @
+
+proc(1)=ChebEval3(avec,z,p,d);
+
+  local i, j, y, t1, t2, x;
+
+  /* check consistency */
+  if (rows(avec)/=p[1]) or (cols(avec)/=p[2]); 
+      ?"Incorrect number of coefficients";
+      ?"Press any key";wait;
+       retp(miss(1,1));
+  endif;
+  
+  x=zeros(2,1);
+  x[1]=( (2*(z[1]-d[1,1]))./(d[1,2]-d[1,1])) - 1; @ Map z1 into [-1,1] @
+  x[2]=( (2*(z[2]-d[2,1]))./(d[2,2]-d[2,1])) - 1; @ Map z2 into [-1,1] @
+
+  t1=zeros(p[1],1);t1[1]=1; t1[2]=x[1];
+  t2=zeros(p[2],1);t2[1]=1; t2[2]=x[2];
+
+  i=3;
+  do until i>p[1];
+     t1[i]=2*x[1]*t1[i-1]-t1[i-2];     
+         i=i+1;
+  endo;
+  i=3;
+  do until i>p[2];
+     t2[i]=2*x[2]*t2[i-1]-t1[i-2];
+         i=i+1;
+  endo;
+
+  i=1;y=0;
+  do until i>p[1];
+     j=1;
+     do until j>p[2];
+        y=y+avec[i,j]*t1[i]*t2[j];@?"i j gvec[i,j] t1[i] t2[j] "; ? i j avec[i,j] t1[i] t2[j];wait;@
+        j=j+1;        
+     endo;
+     i=i+1;
+  endo;
+
+retp(y);
+
+endp;
+
+       
+
+@ -------------------------------- ChebCoef ------------------------------------------------------------
+
+   Purpose: uses Chebyshev regression to compute the coefficients of a n-th degree
+            approximation of f using Chebyshev polynomials.
+
+   Usage:  alpha=ChebCoef(&f,n,m,d)
+
+
+   Input:  &f, pointer to the function that is to be approximated
+           n,  integer, degree of the polynomial
+           m,  integer, number of data points to be used in the regression
+           d,  2 times 1 vector, d[1] lower, d[2] upper bound of the interval over which f is to be approximated
+
+   Output: alpha:= n times 1 vector of coefficients
+
+--------------------------------------------------------------------------------------------------------- @
+
+proc(1)=ChebCoef(&f,n,m,d);
+
+
+   local xbar, zbar, ybar, alpha, k, i, t0, t1, t2, f: proc;
+
+
+   /* Test for proper input */
+   if m<n; ?"There must be at least as many data points as there are coefficients to compute";
+           ?"Procedure puts m=n";
+           m=n;
+   endif;
+
+  k=seqa(1,1,m);
+
+  /* Compute zeros */
+  xbar=cos( ((2*k-1)/(2*m))*pi );
+
+  /* adjust to the [a,b] interval */
+  zbar=(xbar+1)*(d[2]-d[1])*(1/2) + d[1];
+
+  /* Compute y */
+  ybar=f(zbar);
+
+  /* Compute coefficients */
+  t0=ones(m,1);
+  t1=xbar;
+  t2=2*(xbar.*t1)-t0;
+
+  alpha=zeros(n,1);
+  alpha[1]=(1/m)*sumc(ybar);
+  alpha[2]=(2/m)*(ybar'*t1);
+  i=3;
+  do until i>n;     
+      alpha[i]=(2/m)*(ybar'*t2);
+      t0=t1;
+      t1=t2;
+      t2=2*(xbar.*t1)-t0;
+     i=i+1;
+  endo;
+
+retp(alpha);
+endp;
+
+
+@ ----------------------------------------- QuasiNewton ----------------------------------------------------
+
+    Purpose: Find the minimizer of a user supplied function
+
+    Usage: {x1,crit}=QuasiNewton(x0,&f)
+
+    Input:  x0 : n times 1 vector, initial value
+            &f : pointer to f, where f must return a scalar
+
+    Output: x1 : n times 1 vector, the found solution
+           crit: 5 times 1 vector, crit[1]:=return code: 0: normal termination
+                                                         1: function evaluation at x not possible
+                                                         2: step2<Mstep, and no further reduction in f possible,
+                                   crit[2]:=the maximum absolute value of the scaled gradient at x1
+                                   crit[3]:=the maximum relative change of x between the last two iterations
+                                   crit[4]:=the value of f at x1
+                                   crit[5]:=number of iterations
+
+    Gobals:     _QN_Print = 1 print to screen, =0 do not print messages to screen, default
+                _GradTol  = 1 use defaul value of MachEps^(1/3)
+                _ParTol   = 1.e-7 (about 7 good digits in x), default
+
+---------------------------------------------------------------------------------------------------------- @
+
+declare matrix _QN_Print    != 0;      @ Do not print messages do screen          @          
+declare matrix _QN_GradTol  != 1;      @ use default value for GradTol            @
+declare matrix _QN_ParToL   != 1.e-7;  @ about 7 good digits in computation of x1 @
+
+proc(2)=QuasiNewton(x0,&f);
+
+    local df1,df2,x1,x2,f1,f2,crit, mStep, step1, step2,dx,dgrad,h,itn,maxit,rc,ptol,gtol;
+
+    local f:proc;
+      
+
+    /* initialize */
+    crit=zeros(5,1);
+
+    if _QN_GradTol; @ Gradient tolerance @
+          gTol=MachEps^(1/3);
+    else;
+          gTol=_QN_GradTol;
+    endif;
+
+    ptol =MachEps^(2/3); @ Parameter tolerance used in computation of stepsize @
+    h=eye(rows(x0));
+    x1=x0;
+    maxit=500;
+    
+    f1=f(x1);
+    @df1=gradp(&f,x1);@
+    df1=CDJac(&f,x1,1);
+    crit[2]=GradTest(df1,x1,f1);
+
+    /* Check whether initial value is already a good solution canditate */
+    if crit[2]<1.e-3*gTol; 
+             crit[1]=0; crit[5]=0; crit[3]=miss(1,1); crit[4]=f1;
+             retp(x1,crit);
+    endif;    
+
+    /* iterate */
+          itn=1;    
+      crit[3]=1;
+
+    do while itn<maxit;
+       if _QN_Print; 
+          locate 1,1;?"QN-Iteration #= " ftos(itn,"*.*lf",5,0);
+          locate 2,1;?"gTol   := " ftos(crit[2],"*.*lf",25,14);
+          locate 3,1;?"pTol   := " ftos(crit[3],"*.*lf",25,14);
+          locate 4,1;?"f(x)   := " ftos(crit[4],"*.*lf",25,14);
+       endif;
+
+       dx=solpd(-df1',h);
+
+       /* Reduce step size,if f cannot be computed at full Newton step */
+    @   mStep=MinStep(x1,dx,ones(rows(x1),1),pTol);@
+        mStep=pTol;
+       step1=1;
+@       do while (scalmiss(f(x1+step1*dx)) and (step1>mStep)); @
+        do while (scalmiss(f(x1+step1*dx)) and (step1>pTol));
+          step1=step1/2;
+        endo;
+       if (step1<mStep);
+          crit[1]=1;
+          retp(x1,crit);
+       endif;
+       dx=step1*dx;       
+       {step2,rc}=QNStep(x1,dx,f1,df1,&f);
+       if _QN_Print;
+          locate 5,1; ?"MStep=   " ftos(MStep,"*.*lf",20,15);
+          locate 6,1; ?"Step1=   " ftos(step1,"*.*lf",20,15);
+          locate 7,1; ?"Step2=   " ftos(step2,"*.*lf",20,15);
+       endif;
+       dx=step2*dx;
+       x2=x1+dx;
+       f2=f(x2);
+       crit[4]=f2;
+       @df2=gradp(&f,x2);@
+        df2=CDJac(&f,x2,1);
+
+       /* Check for convergence */       
+       crit[2]=GradTest(df2,x2,f1);
+       crit[3]=ParTest(x2,dx,ones(rows(x2),1));
+       if ((crit[2] > gtol) and rc);
+          crit[1]=2;
+          retp(x2,rc);
+       endif;
+       if crit[2]<gtol;
+          if rc; crit[1]=0; retp(x2,crit); endif;          
+          if crit[3]<_QN_ParTol;
+             crit[1]=0;
+             retp(x2,crit);
+          endif;
+       endif;
+
+       /* Update h */
+      dgrad=df2-df1;
+      h=h-(((h*dx)*(dx'h))/(dx'h*dx))+((dgrad'dgrad)/(dgrad*dx));
+      df1=df2;
+      x1=x2;
+      f1=f2;
+      itn=itn+1;
+      crit[5]=itn;
+ endo;
+ retp(x1,2);
+
+endp;
+
+@ --------------------------------------- GradTest -------------------------------------------------------
+
+    Purpose: Computes the relative gradient (the elasticity of f at x) and returns the
+             maximum absolute value. This is one of the stopping criteria suggested
+             by Dennis and Schnabel (1983).
+
+    Usage: crit=GradTest(df,x,fx);
+
+    Input: df := n times 1 vector, the gradient of f at x
+            x := n times 1 vector, the point at which df is evaluated
+           fx := scalar, the value of f at x
+
+    Output: crit := scalar the relative gradient
+----------------------------------------------------------------------------------------------------- @
+
+proc(1)=GradTest(df,x,fx);
+
+    local crit, i, n;
+    n=rows(x);
+    crit=zeros(n,1);
+    i=1;
+    do until i>n;
+       crit[i]=abs(df[i])*maxc(abs(x[i])|1.0);
+       crit[i]=crit[i]/maxc(abs(fx)|1.0);
+             i=i+1;
+    endo;
+
+  retp(maxc(crit));
+
+endp;
+
+
+@--------------------------------------- MinStep ----------------------------------------------------
+
+  Purpose: Compute the minimal step size so that x1=x0+mstep*dx=0
+           (in terms of the parameter tolerance criterium pTol)
+
+  Usage: mstep=MinStep(x,dx,typx,pTol);
+
+  Input:  x := n times 1 vector
+         dx := n times 1 vector, change in x
+        typx:= n times 1 vector, typical elements of x          
+        pTol:= scalar
+
+
+  Output: mstep:= scalar
+
+---------------------------------------------------------------------------------------------------   @
+
+proc(1)=MinStep(x,dx,typx,pTol);
+
+   local temp, converge, i, n;
+
+   n=rows(x);
+   i=1;
+   converge=0;
+
+   Do until i>n;
+
+       temp=abs(dx[i])/maxc(abs(x[i])|abs(typx[i]));
+       if (temp > converge);
+            converge=temp;
+       endif;
+       i=i+1;
+
+   endo;
+
+   retp(PTol/converge);
+
+endp;
+
+
+@ ----------------------------------- ParTest -------------------------------------------------- 
+
+   Purpose: Compute relative change in x
+
+   Usage:   crit=ParTest(x,dx,typx);
+
+   Input:   x := n times 1 vector
+           dx := n times 1 vector, change in x
+         typx := n times 1 vector, typical elements of x
+
+   Output: crit := scalar
+
+----------------------------------------------------------------------------------------------- @
+
+ proc(1)=ParTest(x,dx,typx);
+
+   local i, n, crit;
+
+    n=rows(x);
+    crit=zeros(n,1);
+    i=1;
+    do until i>n;
+       crit[i]=abs(dx[i])/maxc(abs(x[i])|abs(typx[i]));
+             i=i+1;
+    endo;
+
+   retp(maxc(crit));
+
+endp;
+
+
+
+@ --------------------------------------------- QNStep ----------------------------------------
+
+ Purpose:  Find the step size s so that the Quasi-Newton algorithm
+           always moves in the direction of a (local) minimum of
+           f(x)
+
+
+ Usage:    {s,rc}=GetStep4(x0,dx0,f0,df,&f);
+
+ Input:    x0 := n times 1 vector, the initial point
+           dx0:= n times 1 vector, the Newton direction
+           f0 := f(x0)
+           df := 1 times n vector, the gradient of f at x_0
+           &f := pointer to the function f
+
+ Output:   s  := admissible stepsize
+          rc  := return code: rc=0=normal exit, rc=1=minimal stepsize reached
+------------------------------------------------------------------------------------------------ @
+
+      
+proc(2)=QNStep(x0,dx0,f0,df,&f);
+
+  local s, x1, s1, s2, smult, smin, smax, pTol, f1, f2, amat, bvec, ab, dfdx, nobs, rc, disc;
+  local f:proc;
+
+
+  /* Fixed parameters of the algorithm */
+  smult=1.0e-4; smin=0.1; smax=0.5; pTol=MachEps^(2/3);
+  
+  /* Initialize */
+  s=1.0;
+  s1=1.0;
+  s2=1.0;
+  rc=0;
+  amat=zeros(2,2); bvec=zeros(2,1);   
+ dfdx=df*dx0;                        @ df(x0)*dx0                          @
+ f1=f(x0+dx0);
+ f2=f1;
+
+ /* Try the full Newton step s=1 */
+ if f1 <= f0 + smult*dfdx;
+    retp(s1,rc);
+ else;
+    s=-dfdx/(2*(f1-f0-dfdx));
+    if s<smin; s=smin; endif;
+    if s>smax; s=smax; endif;
+    x1=x0+s*dx0;
+    f2=f(x1);
+ endif;
+ s2=s;
+
+ /* Reduce s2 further unless f2 < f0 + s2*smult*dfdx */
+ do while (f2 > (f0 + smult*s2*dfdx) );
+    amat[1,1]=1/(s2^2);  amat[1,2]=-1/(s1^2); amat[2,1]=-s1/(s2^2); amat[2,2]=s2/(s1^2);
+    bvec[1]=f2-s2*dfdx-f0; bvec[2]=f1-s1*dfdx-f0;
+    ab=(amat*bvec)/(s2-s1);
+    if (ab[1,1] == 0.0);
+            s=-dfdx/(2*ab[2,1]);
+      else;
+          disc=(ab[2,1]^2)-3*ab[1,1]*dfdx;  
+          if (disc < 0.0);
+             s=s2*smax;
+           elseif (ab[2,1] <= 0.0);
+             s=(-ab[2,1]+sqrt(disc))/(3*ab[1,1]);
+           else;
+             s=-dfdx/(ab[2,1]+sqrt(disc));
+           endif;
+      endif;           
+     if s < s2*smin; s=s2*smin; endif;
+     if s > s2*smax; s=s2*smax; endif;
+    @ if s<MinStep(x0,s*dx0,ones(rows(x0),1),pTol); retp(s,1); endif; @
+      if s<pTol; retp(s,1); endif;
+     s1=s2;
+     s2=s;
+     f1=f2;
+     x1=x0+s2*dx0;
+     f2=f(x1);
+
+ endo;
+
+ retp(s2,rc);
+
+endp;
+      
+@ ----------------------------------------------- GSearch1 ----------------------------------------------------
+
+   Purpose: function minimization using a genetic search algorithm
+
+   Usage:   {x1,f1}=GSearch(NPar,Npop,Ngen,&f)
+
+   Input:   Npar :=  integer, the number of elements in x
+            Npop :=  integer, the size of the population
+            Ngen :=  integer, the number of iterations (number of generations)
+               &f:=  pointer to the function that evalautes the fitness of a canditate solution
+                     (the function whose minimim is to be found)
+
+   Output:    x1 := Npar times 1 vector, the best canditate solution
+              f1 := scalar, f(x1)
+
+------------------------------------------------------------------------------------------------------------ @
+ 
+
+proc(2)=GSearch1(NPar,Npop,Ngen,&F);
+
+  local Genes0, Genes1, Par, fit, fit1, fit2, i, i1, j1, j2, j3, j4, r1,
+        p, p1, p2, c1, c2, lambda, m_ind, dpar, smin, mu1, mu2,
+        fmin, fmax, fstdv, gnum, get_i, get_p, get_n, b, probco, probmut;
+
+  local F:proc;
+
+  /* Parameters that determine the behavior of GSearch */
+  probco=0.95;     @ probability of crossover @
+
+  mu1=0.15;        @ parameters of probability function for mutations to apply @
+  mu2=0.33;
+  b=2;             @ used in mutation operations @
+
+
+
+  /* Initialize population */
+  Genes0=zeros(npop,Npar+2);
+  Genes1=Genes0;
+
+  locate 2,2;
+  ?"Initialize Population";
+  i=1;
+  do until i>npop;
+
+     locate 2,25;
+     ?ftos(i,"*.*lf",4,0);  
+     Par=rndn(Npar,1);  
+     fit=F(Par);     
+     do while scalmiss(fit);     
+       Par=rndn(Npar,1);
+       Fit=F(Par);
+     endo;
+    Genes0[i,1:Npar]=Par';
+    Genes0[i,NPar+1]=fit;
+      i=i+1;
+  endo;
+
+  /* Print summary statistics */
+   fmin=minc(Genes0[.,NPar+1]);
+   fmax=maxc(Genes0[.,NPar+1]);
+  fstdv=stdc(Genes0[.,NPar+1]);
+  locate 2,2;  
+  ?"Best Cromosome:     " ftos(fmin,"*.*lG",10,6);
+  locate 3,2;
+  ?"Worst Cromosome:    " ftos(fmax,"*.*lG",10,6);
+  locate 4,2;
+  ?"Standard Deviation: " ftos(fstdv,"*.*lG",10,6);
+   
+  /* Start Selection Process */
+
+  gnum=1;
+
+  do until gnum>Ngen;  @ Begin Loop over successive generations @
+      Genes1=zeros(npop,NPar+2);
+      locate 6,2;
+      ?"Generation No.: " ftos(gnum,"*.*lf",3,0);
+      i=1;
+      i1=1;
+      do until i>(npop/2); @ Begin Loop over selection from one generation @
+      locate 6,25;?"Current population size=" ftos(i1,"*.*lf",3,0);
+ 
+     /* Draw two pairs from Genes0 */   
+      get_i=rndu(4,1);
+      P=zeros(4,1);  @ holds indices of parents @
+      P=1+round((npop-1)*get_i);
+         
+      /* Find the two fittest parents */
+      Get_p=p~genes0[p,NPar+1];
+      Get_p=sortc(Get_p,2);
+      p1=get_p[1,1];
+      p2=get_p[2,1];
+
+      /* Decide whether crossover is to be performed */
+      if rndu(1,1)<=probco;
+         /* Find out which method is to be employed */
+         m_ind=rndu(1,1);
+         if (m_ind<1/3);  @ arithmetic crossover @
+            lambda=rndu(1,1);
+            C1=lambda*Genes0[p1,1:Npar]+(1-lambda)*Genes0[p2,1:Npar];
+            C2=lambda*Genes0[p2,1:Npar]+(1-lambda)*Genes0[p1,1:Npar];
+         endif;
+         if ((m_ind>=1/3) and (m_ind<2/3)); @ Single-point crossover @
+            lambda=1+round((Npar-2)*rndu(1,1));
+            C1=Genes0[p1,1:lambda]~Genes0[p2,1+lambda:Npar];
+            C2=Genes0[p2,1:lambda]~Genes0[p1,1+lambda:Npar];
+         endif;
+         if (m_ind>=2/3); @ Shuffle crossover @
+            j3=1;
+            C1=zeros(1,Npar);
+            C2=C1;
+            do until j3>Npar;
+               lambda=rndn(1,1);
+               if lambda >= 0.5; 
+                  C1[j3]=Genes0[p2,j3];
+                  C2[j3]=Genes0[p1,j3];
+               else;
+                  C1[j3]=Genes0[p1,j3];
+                  C2[j3]=Genes0[p2,j3];
+               endif;
+               j3=j3+1;
+             endo;
+          endif;
+      else; @ otherwise Children and Parents are identically @
+         C1=Genes0[p1,1:Npar];
+         C2=Genes0[p2,1:Npar];
+      endif;
+
+      /*  Mutation operations: on C1 */
+      j4=1;
+      do until j4>3;
+         gosub compute_probmut;
+         if rndu(1,1)<probmut;
+           dpar=rndn(1,1);
+           r1=rndu(1,1);
+           if rndu(1,1)>0.5;
+              C1[j4]=C1[j4]+dpar*(1-(r1^((1-gnum/Ngen)^b)));
+           else;
+              C1[j4]=C1[j4]-dpar*(1-(r1^((1-gnum/Ngen)^b)));
+           endif;
+         endif;
+         j4=j4+1;
+      endo;
+      /*  Mutation operations: on C2 */
+      j4=1;
+      do until j4>3;
+         gosub Compute_probmut;
+         if rndu(1,1)<probmut;
+           dpar=rndn(1,1);
+           r1=rndu(1,1);
+           if rndu(1,1)>0.5;
+              C2[j4]=C1[j4]+dpar*(1-(r1^((1-gnum/Ngen)^b)));
+           else;
+              C2[j4]=C1[j4]-dpar*(1-(r1^((1-gnum/Ngen)^b)));
+           endif;
+         endif;
+         j4=j4+1;
+      endo;
+      /* Evalutate Fittness of Children and select fittest pair
+      ** for next generation */
+       Fit1=F(C1'); 
+       Fit2=F(C2');
+       get_n=C1~Fit1|C2~Fit2|Genes0[p1,1:Npar+1]|Genes0[p2,1:Npar+1];
+       get_n=packr(sortc(get_n,Npar+1));
+       Genes1[i1:i1+1,1:Npar+1]=get_n[1:2,.];
+        i=i+1;
+        i1=i1+2;
+      
+      endo; @ End loop over selection from one generation @
+
+     /* Apply Elitism */
+    Genes1=sortc(Genes1,Npar+1);
+    Genes0=sortc(Genes0,Npar+1);
+        locate 8,2;
+        ?"Best old chromosome: " Genes0[1,Npar+1];        
+        locate 9,2;
+        ?"Best new chromosome: " Genes1[1,Npar+1];
+        
+    if Genes1[1,Npar+1]>Genes0[1,Npar+1];
+        Genes1[npop,1:Npar+1]=Genes0[1,1:Npar+1];        
+    endif;
+
+   /* Interchange Populations  */
+   Genes0=Genes1;
+   
+   gnum=gnum+1;
+
+endo;
+
+smin=minindc(genes0[.,Npar+1]);
+
+retp(genes0[smin,1:Npar]',genes0[smin,Npar+1]);
+
+  compute_probmut:
+   probmut=mu1 + mu2/gnum;
+  return;
+
+endp;
+
+
+
+/* CDJac
+**
+** usage: Jac=CDJac(&f,x0,n)
+**
+**
+** purpose: computes a central difference approximation of the Jacobian
+**          matrix of a system of n non-linear functions y_i=f^i(x), where
+**          x is a column vector of dimension m.
+**
+** input:  &f: pointer to the routine that returns the m-vector f(x)
+**         x0: m vector x0, the point at which the derivatives are to be evaluated
+**         n : the size of the vector f(x)
+**
+** output: Jac: n by m matrix of parital derivatives
+**
+** algorithm: based on (A.2.8) in Heer and Maussner, see also Dennis and Schnabel (1983), 
+**            Algorithm A5.6.4.
+*/
+
+proc(1)=CDJac(&f,x0,n);
+
+  local eps, i, j, m, h, df, f1, f2, x1, x2, temp;
+  local f:proc;
+  m=rows(x0);
+  df=zeros(n,m);
+  eps=MachEps^(1/3);
+  x1=x0;
+  x2=x0;
+  i=1;
+
+  do until i>m;
+     if x0[i]<0;
+        h=-eps*maxc(abs(x0[i])|1.0);
+     else;
+        h=eps*maxc(abs(x0[i])|1.0);
+    endif;
+    temp=x0[i];
+    x1[i]=temp+h;
+    x2[i]=temp-h;
+        h=x1[i]-temp; @ Trick to increase precision slightly, see Dennis and Schnabel (1983), p. 99 @
+    f1=f(x1);
+    f2=f(x2);
+    j=1;
+    do until j>n;
+       df[j,i]=(f1[j]-f2[j])/(2*h);
+       j=j+1;
+    endo;
+    x1[i]=x0[i];
+    x2[i]=x0[i];
+    i=i+1;
+ endo;
+ retp(df);
+
+endp;
+
+/* FixvMN1: Solves a system of non-linear equations using a modified Newton Method
+**
+** Usage:   {x,crit}=FixVMN1(x0,&F)
+**
+**  Input:  &F  := Pointer the vector valued function F(x), whose
+**                 zero, F(x1)=0, is to be computed. 
+**
+**          x0  := k times 1 vector of starting values
+** 
+**
+** 
+**  Output: x1  := k times 1 vector, the approximate solution to F(x1)=0
+**         crit :=         1 vector, where
+**                                   crit[1]=0 : normal termination 
+**                                          =1 : function evaluation failed,
+**                                          =2 : no further decrease in function value possible, 
+**                                          =3 : maximum number of iterations exceedes
+**                                   crit[2]   : termination criterion: maxc(abs(F(x)))
+**                                   crit[3]   : the maximum relative change of x between the last two iterations
+**                                   crit[4]   : F(x)'F(x)/2
+**                                   crit[5]   : number of iterations
+**
+**
+** Gobals: _MNR_Print=1 (0) do (not) print messages to the screen
+**
+**         _MNR_Gobal=1 (0) do (not) use line search
+**
+**         _MNR_QR=1 (0) do (not) use QR factorization to solve for the Newton step
+*/
+
+declare matrix _MNR_Global != 1;  @ Use GetStep in FixvMN                    @
+declare matrix _MNR_Print  != 0;  @ FixvMN print no messages to the screen   @
+declare matrix _MNR_QR     != 0;  @ do not use QR factorization for solution @
+
+
+proc(2)=FixVMN1(x0,&f);
+
+  local x1, x2, dx, df, dg, crit, critold, stopc, step1, step2, maxit;
+  local f:proc;
+
+  /* Initialize */
+    maxit=5000;     @ stop after 5000 Iterations @
+    stopc=1e-8;     @ stopping criterium @
+       x1=x0;
+
+  /* Start Iterations */
+     crit=ones(5,1);
+     crit[1]=0;
+ critold=2;
+
+  if _MNR_Print; cls; endif; @ clear screen if output is printed to the screen @
+
+  do until ((crit[2]<stopc) or (crit[5] > maxit));      @ start iterations @
+      if _MNR_Print;
+         locate 1,2;
+         ?"Step No: " ftos(crit[5],"*.*lf",5,0) "Convergence criterion: " crit[2];
+         if _MNR_Global;
+           locate 2,2;
+           ?"Minimization criterion: "  crit[4] " decrease in function value? " ftos((crit[4]<critold),"*.*lf",1,0);
+         endif;
+      endif;
+        @df=gradp(&F,x1);df;wait;@
+        df=CDJac(&F,x1,rows(x1));
+        if ismiss(df); crit[1]=1; retp(x1,crit); endif;
+      if _MNR_Global;  dg=F(x1)'df; endif;
+
+     if _MNR_QR;
+        dx=LSolve(df,-f(x1)); @ use the QR-factorization @
+     else;
+        dx=-inv(df)*F(x1);  
+     endif;    
+         x2=x1+dx;
+      step1=1;
+      do while scalmiss(f(x1+step1*dx));
+         step1=0.75*step1;
+      endo;
+      if _MNR_Print;
+       locate 3,2;
+       ?"Step1= " step1;
+      endif;
+      if step1<1.0e-16;
+           crit[1]=1;
+           retp(x1,crit);
+      endif;
+      dx=step1*dx;
+      if _MNR_Global;  step2=NRStep(x1,dx,dg,&f); else; step2=1; endif;
+
+      if _MNR_Print;
+         locate 4,2;
+         ?"Step2= " step2;
+      endif;
+
+      if step2<0.0;
+            crit[1]=2;
+            retp(x1,crit);
+       endif;               
+       x2=x1+step2*dx;
+       crit[2]=maxc(abs(F(x2)));
+       crit[3]=ParTest(x1,step2*dx,ones(rows(x1),1));
+       if _MNR_Global;     critold=crit[4];  crit[4]=(F(x2)'F(x2))/2;    endif;
+       x1=x2;
+      crit[5]=crit[5]+1;
+   endo;
+   if crit[5] >= maxit; crit[1]=3;  endif;
+
+retp(x1,crit);
+
+endp;
+
+
+
+/* LSolve:
+**
+**  Purpose: Solve a system of linear equations Ax=b using the QR-decomposition
+**
+**  Usage:  x=LSolve(A,b)
+**
+**  Input:  A: square matrix of dimension n
+**          b: vector of dimension n
+**
+**  Output: x: vector of dimension n
+*/   
+
+proc(1)=LSolve(a,b);
+
+ local r, d, q;
+ {q,r}=qqr(a); 
+retp(qrsol(q'b,(q'q)*r));
+
+endp;
+
+/* NRStep:
+**
+** Purpose:  Find the step size s so that the Newton-Raphson algorithm
+**           always moves in the direction of a (local) minimum of (1/2)(f(x)'f(x))
+**
+**
+** Usage:    s=NRStep(x0,dx0,dg,&f);
+**
+** Input:    x0 := n times 1 vector, the initial point
+**           dx0:= n times 1 vector, the Newton direction
+**           dg := 1 times n vector, the gradient of (1/2)(f'f) at x_0
+**           &f := pointer to the function whose zero x solves the system of equations
+**
+** Output:   s  := admissible stepsize
+*/
+
+      
+proc(1)=NRStep(x0,dx0,dg,&f);
+
+  local s, x1, s1, s2, smult, smin, smax, stol, tol, g0, g1, g2, amat, bvec, ab, dgdx, disc;
+  local f:proc;
+
+
+  /* Fixed parameters of the algorithm */
+  smult=1.0e-4; smin=0.1; smax=0.5; stol=1.e-11;
+  
+  /* Initialize */
+  s1=1.0;
+  amat=zeros(2,2); bvec=zeros(2,1);
+   g0=(1/2)*(f(x0)'f(x0));
+ dgdx=dg*dx0;                        @ dg(x0)*dx0                          @
+ g1=(1/2)*(f(x0+dx0)'f(x0+dx0));
+
+
+ /* Try the full Newton step s=1 */
+ if g1 <= g0 + smult*dgdx;
+    retp(s1);
+ else;
+    s=-dgdx/(2*(g1-g0-dgdx));
+    if s<smin; s=smin; endif;
+    if s>smax; s=smax; endif;
+    x1=x0+s*dx0;
+    g2=(1/2)*(f(x1)'f(x1));
+ endif;
+ s2=s;
+
+ /* Reduce s2 further unless g2 < g0 + s2*smult*dgdx */
+ do while (g2 > (g0 + smult*s2*dgdx) );
+
+    amat[1,1]=1/(s2^2);  amat[1,2]=-1/(s1^2); amat[2,1]=-s1/(s2^2); amat[2,2]=s2/(s1^2);
+    bvec[1]=g2-s2*dgdx-g0; bvec[2]=g1-s1*dgdx-g0;
+    ab=(amat*bvec)/(s2-s1);
+
+    if (ab[1,1] == 0.0);
+            s=-dgdx/(2*ab[2,1]);
+      else;
+          disc=(ab[2,1]^2)-3*ab[1,1]*dgdx;  
+          if (disc < 0.0);
+             s=s2*smax;
+           elseif (ab[2,1] <= 0.0);
+             s=(-ab[2,1]+sqrt(disc))/(3*ab[1,1]);
+           else;
+             s=-dgdx/(ab[2,1]+sqrt(disc));
+           endif;
+      endif;               
+
+    if s < s2*smin; s=s2*smin; endif;
+    if s > s2*smax; s=s2*smax; endif;
+
+    tol=sqrt((s*dx0)'(s*dx0))/(1+sqrt(x0'x0));
+    if tol < stol; retp(-1.0); endif;
+    s1=s2;
+    s2=s;
+    g1=g2;
+    x1=x0+s2*dx0;
+    g2=(1/2)*(f(x1)'f(x1));
+
+ endo;
+
+retp(s2);
+
+endp;
+      
+
+@ ------------------------------------------------ GC_Int1---------------------------------------------------------
+
+   Purpose: Integrate a real valued function over [a,b], using Gauss-Chebyshev quadrature
+
+   Usage:  v=GC_Int(&f, d, n);
+
+   Input: &f := pointer to the procedure that evaluates the function, usage must be y=f(x)
+           d := 2 times 1 vector, d[1] lower, d[2] upper limit of integration
+           n := Integer, the number of nodes where f is to be evaluated in order to compute v
+
+   Output: v := scalar: the (approximate) value of the integral
+
+----------------------------------------------------------------------------------------------------------------- @
+
+proc(1)=GC_Int1(&f,d,n);
+
+    local x, z, i, sum, f:proc;
+
+    x=cos(((2*seqa(1,1,n)-1)/(2*n))*pi);  @ zeros of the n-th degree Chebyshev polynomial @
+    z=(x+1).*(d[2]-d[1])*0.5 + d[1];      @ adjusted to [a,b]                             @
+    
+    sum=0;
+    i=1;
+    do until i>n;
+        sum=sum+f(z[i])*sqrt(1-x[i]^2);
+          i=i+1;
+    endo;
+   
+    sum=pi*(d[2]-d[1])*sum;
+    sum=sum/(2*n);
+
+ retp(sum);
+
+endp;
+
+
+@ ------------------------------------------------ GC_Int2 --------------------------------------------------------
+
+   Purpose: Integrate a real valued function f(x,y) over [a,b]x[c,d], using Gauss-Chebyshev quadrature
+
+   Usage:  v=GC_Int(&f, d, n);
+
+   Input: &f := pointer to the procedure that evaluates the function, usage must be z=f(x,y)
+           d := 2 times 2 matrix, d[1,1] lower, d[1,2] upper limit of integration for x,
+                                  d[2,1] lower, d[2,2] upper limit of integration for y
+           n := 2 times 1 vector, n[1] the number of nodes for x, n[2] the number of node for y
+
+   Output: v := scalar: the (approximate) value of the integral
+
+   Remarks: if f(x,y) returns a scalar missing value (since f is not computable at this point)
+            the procedure stops and returns a missing value code.
+
+----------------------------------------------------------------------------------------------------------------- @
+
+proc(1)=GC_Int2(&f,d,n);
+
+    local x1, x2, z1, z2, i, j, sum, y, f:proc;
+
+    x1=cos(((2*seqa(1,1,n[1])-1)/(2*n[1]))*pi);  @ zeros of the n-th degree Chebyshev polynomial for x @
+    x2=cos(((2*seqa(1,1,n[2])-1)/(2*n[2]))*pi);  @ zeros of the n-th degree Chebyshev polynomial for y @
+    z1=(x1+1).*(d[1,2]-d[1,1])*0.5 + d[1,1];     @ adjusted to [a,b]                             @
+    z2=(x2+1).*(d[2,2]-d[2,1])*0.5 + d[2,1];     @ adjusted to [c,d]                             @
+
+    sum=0;
+    i=1;
+    do until i>n[1];
+        j=1;
+        do until j>n[2];
+            y=f(z1[i],z2[j]);
+            if scalmiss(y); retp(miss(1,1)); endif;
+            sum=sum+y*sqrt(1-x1[i]^2)*sqrt(1-x2[j]^2);
+              j=j+1;
+        endo;
+        i=i+1;
+    endo;
+   
+    sum=pi*(d[1,2]-d[1,1])*pi*(d[2,2]-d[2,1])*sum;
+    sum=sum/(2*n[1]*2*n[2]);
+
+ retp(sum);
+
+endp;
